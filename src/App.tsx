@@ -35,6 +35,32 @@ interface ShadowPolygon {
   shadow: [number, number][];
 }
 
+interface SegmentAnalysis {
+  segmentIndex: number;
+  length: number;
+  heading: number;
+  isEastWest: boolean;
+  isNorthSouth: boolean;
+  samplePoints: number;
+  shadowHits: number;
+  sideShadeFactor: number;
+  exposureScore: number;
+}
+
+interface RouteAnalysis {
+  routeId: string;
+  label: string;
+  totalDistance: number;
+  totalDuration: number;
+  sunExposure: number;
+  segments: SegmentAnalysis[];
+  buildingsPassed: Building[];
+  shadowCoverage: number;
+  sideShadeScore: number;
+  alternativesConsidered: number;
+  chosenReason: string;
+}
+
 const VALHALLA_URL = 'https://valhalla1.openstreetmap.de/route';
 
 const TIME_OPTIONS = [
@@ -109,7 +135,6 @@ async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Pr
       return null;
     }
 
-    // Concatenate all legs
     const coordinates: [number, number][] = [];
     data.trip.legs.forEach((leg: any) => {
       const legCoords = decodePolyline(leg.shape, 6);
@@ -157,7 +182,6 @@ async function fetchBuildings(minLat: number, minLon: number, maxLat: number, ma
       .map((e: any) => {
         const footprint = e.geometry.map((n: any) => [n.lon, n.lat] as [number, number]);
         
-        // Get height: explicit height > levels estimate > default
         let height = 0;
         if (e.tags.height) {
           const match = e.tags.height.match(/^(\d+(?:\.\d+)?)/);
@@ -165,7 +189,7 @@ async function fetchBuildings(minLat: number, minLon: number, maxLat: number, ma
         } else if (e.tags['building:levels']) {
           height = parseFloat(e.tags['building:levels']) * 3.5;
         } else {
-          height = 10; // Default 10m
+          height = 10;
         }
 
         return {
@@ -183,7 +207,7 @@ async function fetchBuildings(minLat: number, minLon: number, maxLat: number, ma
   }
 }
 
-// Calculate sun position for a given time
+// Calculate sun position
 function getSunPosition(lat: number, lon: number, timeStr: string) {
   let date: Date;
   
@@ -204,16 +228,14 @@ function getSunPosition(lat: number, lon: number, timeStr: string) {
 
 // Project shadow for a building
 function projectBuildingShadow(building: Building, sunAzimuth: number, sunElevation: number): ShadowPolygon | null {
-  if (sunElevation <= 0) return null; // No shadow when sun is below horizon
+  if (sunElevation <= 0) return null;
   
   const shadowLength = building.height / Math.tan(sunElevation * Math.PI / 180);
   if (shadowLength < 0.1) return null;
   
-  // Shadow direction (opposite of sun)
   const shadowAngle = (sunAzimuth + 180) % 360;
   const shadowRad = shadowAngle * Math.PI / 180;
   
-  // Approximate degrees per km
   const latDegPerKm = 1 / 111;
   const lngDegPerKm = 1 / (111 * Math.cos(building.footprint[0][1] * Math.PI / 180));
   
@@ -222,10 +244,8 @@ function projectBuildingShadow(building: Building, sunAzimuth: number, sunElevat
   
   const shadowPoints: [number, number][] = [];
   
-  // Add footprint points
   building.footprint.forEach(p => shadowPoints.push([p[0], p[1]]));
   
-  // Add shadow points (offset by footprint)
   for (let i = building.footprint.length - 1; i >= 0; i--) {
     const p = building.footprint[i];
     shadowPoints.push([
@@ -240,7 +260,7 @@ function projectBuildingShadow(building: Building, sunAzimuth: number, sunElevat
   };
 }
 
-// Check if a point is inside a polygon (ray casting)
+// Check if a point is inside a polygon
 function pointInPolygon(point: [number, number], polygon: [number, number][]) {
   const x = point[0], y = point[1];
   let inside = false;
@@ -256,74 +276,27 @@ function pointInPolygon(point: [number, number], polygon: [number, number][]) {
   return inside;
 }
 
-// Check if a line segment intersects with a polygon
-function segmentIntersectsPolygon(p1: [number, number], p2: [number, number], polygon: [number, number][]) {
-  for (let i = 0; i < polygon.length; i++) {
-    const j = (i + 1) % polygon.length;
-    if (segmentsIntersect(p1, p2, polygon[i], polygon[j])) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Check if two line segments intersect
-function segmentsIntersect(
-  a1: [number, number], a2: [number, number],
-  b1: [number, number], b2: [number, number]
-) {
-  const ccw = (A: [number, number], B: [number, number], C: [number, number]) => {
-    return (C[0] - A[0]) * (B[1] - A[1]) > (B[0] - A[0]) * (C[1] - A[1]);
-  };
-  
-  return ccw(a1, b1, b2) !== ccw(a2, b1, b2) && ccw(a1, a2, b1) !== ccw(a1, a2, b2);
-}
-
-// Calculate sun exposure for a route segment
-// KEY: Also check side-of-street shade
-function calculateSegmentExposure(
+// Calculate detailed segment analysis
+function analyzeSegment(
   p1: [number, number],
   p2: [number, number],
   shadows: ShadowPolygon[],
-  sunAzimuth?: number
-): number {
-  // Sample points along the segment
-  const samples = 5;
-  let exposedCount = 0;
+  sunAzimuth: number,
+  buildings: Building[]
+): SegmentAnalysis {
+  const dx = p2[0] - p1[0];
+  const dy = p2[1] - p1[1];
+  const latDegPerKm = 1 / 111;
+  const lngDegPerKm = 1 / (111 * Math.cos(((p1[1] + p2[1]) / 2) * Math.PI / 180));
+  const length = Math.sqrt(Math.pow(dx / lngDegPerKm, 2) + Math.pow(dy / latDegPerKm, 2));
   
-  // Calculate side-of-street shade if sun azimuth is provided
-  let sideShadeFactor = 0;
-  if (sunAzimuth !== undefined) {
-    const dx = p2[0] - p1[0];
-    const dy = p2[1] - p1[1];
-    const segmentHeading = Math.atan2(dy, dx) * 180 / Math.PI;
-    
-    // For a street, one side is shaded, the other is sunny
-    // The shaded side depends on street orientation and sun direction
-    // If street is E-W (heading ~90 or 270), and sun is from north (azimuth ~0), south side is shaded
-    // If street is N-S (heading ~0 or 180), and sun is from east (azimuth ~90), west side is shaded
-    
-    // Check if street is roughly E-W or N-S
-    const isEastWest = Math.abs(Math.sin(segmentHeading * Math.PI / 180)) > 0.7;
-    const isNorthSouth = Math.abs(Math.cos(segmentHeading * Math.PI / 180)) > 0.7;
-    
-    // Determine which side is shaded based on sun direction
-    // North sun (azimuth ~0-45 or ~315-360): south side of E-W streets is shaded
-    // South sun (azimuth ~135-225): north side of E-W streets is shaded
-    // East sun (azimuth ~45-135): west side of N-S streets is shaded
-    // West sun (azimuth ~225-315): east side of N-S streets is shaded
-    
-    const sunFromNorth = sunAzimuth < 45 || sunAzimuth > 315;
-    const sunFromSouth = sunAzimuth > 135 && sunAzimuth < 225;
-    const sunFromEast = sunAzimuth > 45 && sunAzimuth < 135;
-    const sunFromWest = sunAzimuth > 225 && sunAzimuth < 315;
-    
-    if (isEastWest && (sunFromNorth || sunFromSouth)) {
-      sideShadeFactor = 0.5; // One side is shaded
-    } else if (isNorthSouth && (sunFromEast || sunFromWest)) {
-      sideShadeFactor = 0.5; // One side is shaded
-    }
-  }
+  const heading = Math.atan2(dy, dx) * 180 / Math.PI;
+  const isEastWest = Math.abs(Math.sin(heading * Math.PI / 180)) > 0.7;
+  const isNorthSouth = Math.abs(Math.cos(heading * Math.PI / 180)) > 0.7;
+  
+  // Sample points
+  const samples = 5;
+  let shadowHits = 0;
   
   for (let i = 0; i <= samples; i++) {
     const t = i / samples;
@@ -332,67 +305,117 @@ function calculateSegmentExposure(
       p1[1] + (p2[1] - p1[1]) * t,
     ];
     
-    let inShadow = false;
     for (const shadow of shadows) {
       if (pointInPolygon(point, shadow.shadow)) {
-        inShadow = true;
+        shadowHits++;
         break;
       }
     }
+  }
+  
+  // Side shade factor
+  let sideShadeFactor = 0;
+  const sunFromNorth = sunAzimuth < 45 || sunAzimuth > 315;
+  const sunFromSouth = sunAzimuth > 135 && sunAzimuth < 225;
+  const sunFromEast = sunAzimuth > 45 && sunAzimuth < 135;
+  const sunFromWest = sunAzimuth > 225 && sunAzimuth < 315;
+  
+  if (isEastWest && (sunFromNorth || sunFromSouth)) {
+    sideShadeFactor = 0.5;
+  } else if (isNorthSouth && (sunFromEast || sunFromWest)) {
+    sideShadeFactor = 0.5;
+  }
+  
+  const exposedCount = (samples + 1) - shadowHits;
+  const baseExposure = exposedCount / (samples + 1);
+  const exposureScore = baseExposure * (1 - sideShadeFactor * 0.3);
+  
+  return {
+    segmentIndex: 0,
+    length,
+    heading,
+    isEastWest,
+    isNorthSouth,
+    samplePoints: samples + 1,
+    shadowHits,
+    sideShadeFactor,
+    exposureScore,
+  };
+}
+
+// Calculate detailed route analysis
+function analyzeRoute(
+  route: RouteData,
+  shadows: ShadowPolygon[],
+  sunAzimuth: number,
+  buildings: Building[]
+): RouteAnalysis {
+  const segments: SegmentAnalysis[] = [];
+  const buildingsPassed = new Set<number>();
+  let totalShadowHits = 0;
+  let totalSamples = 0;
+  let sideShadeScore = 0;
+  
+  for (let i = 1; i < route.coordinates.length; i++) {
+    const p1 = route.coordinates[i - 1];
+    const p2 = route.coordinates[i];
     
-    // If not in building shadow, check if on shaded side of street
-    if (!inShadow && sideShadeFactor > 0) {
-      // Randomly assign shade (in reality, we'd know which side we're on)
-      // For now, we reduce exposure by the sideShadeFactor
-      exposedCount += (1 - sideShadeFactor);
-    } else if (!inShadow) {
-      exposedCount++;
+    const segment = analyzeSegment(p1, p2, shadows, sunAzimuth, buildings);
+    segment.segmentIndex = i - 1;
+    segments.push(segment);
+    
+    totalShadowHits += segment.shadowHits;
+    totalSamples += segment.samplePoints;
+    sideShadeScore += segment.sideShadeFactor * segment.length;
+    
+    // Check which buildings this segment passes near
+    for (const building of buildings) {
+      const centerLng = building.footprint.reduce((sum, p) => sum + p[0], 0) / building.footprint.length;
+      const centerLat = building.footprint.reduce((sum, p) => sum + p[1], 0) / building.footprint.length;
+      
+      const dist = Math.sqrt(
+        Math.pow((p1[0] - centerLng) / lngDegPerKm(centerLat), 2) +
+        Math.pow((p1[1] - centerLat) / latDegPerKm, 2)
+      );
+      
+      if (dist < 0.1) { // Within 100m
+        buildingsPassed.add(building.id);
+      }
     }
   }
   
-  return exposedCount / (samples + 1);
+  const shadowCoverage = totalSamples > 0 ? totalShadowHits / totalSamples : 0;
+  const uniqueBuildings = buildings.filter(b => buildingsPassed.has(b.id));
+  
+  return {
+    routeId: route.id,
+    label: route.label,
+    totalDistance: route.info.distance,
+    totalDuration: route.info.duration,
+    sunExposure: route.info.sunExposure,
+    segments,
+    buildingsPassed: uniqueBuildings,
+    shadowCoverage,
+    sideShadeScore,
+    alternativesConsidered: 0,
+    chosenReason: '',
+  };
 }
 
-// Convert building height to heatmap color (red = taller)
+function latDegPerKm() { return 1 / 111; }
+function lngDegPerKm(lat: number) { return 1 / (111 * Math.cos(lat * Math.PI / 180)); }
+
+// Convert building height to heatmap color
 function heightToColor(height: number): string {
   const minHeight = 5;
   const maxHeight = 100;
   const normalized = Math.min(1, Math.max(0, (height - minHeight) / (maxHeight - minHeight)));
   
-  // Red intensity based on height
   const r = Math.round(255 * normalized);
   const g = Math.round(50 * (1 - normalized));
   const b = Math.round(50 * (1 - normalized));
   
   return `rgba(${r}, ${g}, ${b}, ${0.3 + 0.4 * normalized})`;
-}
-
-// Calculate total sun exposure for a route
-function calculateRouteExposure(
-  coordinates: [number, number][],
-  shadows: ShadowPolygon[],
-  sunAzimuth?: number
-): number {
-  let totalExposure = 0;
-  let totalLength = 0;
-  
-  for (let i = 1; i < coordinates.length; i++) {
-    const p1 = coordinates[i - 1];
-    const p2 = coordinates[i];
-    
-    // Calculate segment length
-    const dx = p2[0] - p1[0];
-    const dy = p2[1] - p1[1];
-    const latDegPerKm = 1 / 111;
-    const lngDegPerKm = 1 / (111 * Math.cos(((p1[1] + p2[1]) / 2) * Math.PI / 180));
-    const length = Math.sqrt(Math.pow(dx / lngDegPerKm, 2) + Math.pow(dy / latDegPerKm, 2));
-    
-    const exposure = calculateSegmentExposure(p1, p2, shadows, sunAzimuth);
-    totalExposure += exposure * length;
-    totalLength += length;
-  }
-  
-  return totalLength > 0 ? totalExposure / totalLength : 0;
 }
 
 function App() {
@@ -401,11 +424,14 @@ function App() {
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const routeLayersRef = useRef<string[]>([]);
   const shadowLayersRef = useRef<string[]>([]);
+  const heatmapLayersRef = useRef<string[]>([]);
+  const heatmapIdCounter = useRef(0);
   const handleMapClickRef = useRef<(lng: number, lat: number) => void>(() => {});
 
   const [start, setStart] = useState<Point | null>(null);
   const [end, setEnd] = useState<Point | null>(null);
   const [routes, setRoutes] = useState<RouteData[]>([]);
+  const [routeAnalysis, setRouteAnalysis] = useState<RouteAnalysis[]>([]);
   const [selectedTime, setSelectedTime] = useState('12:00');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -414,8 +440,7 @@ function App() {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [sunDirection, setSunDirection] = useState<number | null>(null);
-  const heatmapLayersRef = useRef<string[]>([]);
-  const heatmapIdCounter = useRef(0);
+  const [showAnalysis, setShowAnalysis] = useState(false);
 
   const clearMarkers = () => {
     markersRef.current.forEach((m) => m.remove());
@@ -517,6 +542,7 @@ function App() {
       setStart({ lng, lat });
       setEnd(null);
       setRoutes([]);
+      setRouteAnalysis([]);
       setError(null);
       clearMarkers();
       clearRoutes();
@@ -590,7 +616,6 @@ function App() {
     }
   }, [start, end]);
 
-  // Draw heatmap when buildings or showHeatmap changes
   useEffect(() => {
     if (showHeatmap && buildings.length > 0) {
       drawBuildingHeatmap(buildings);
@@ -609,70 +634,54 @@ function App() {
       setLoading(true);
       setError(null);
       setRoutes([]);
+      setRouteAnalysis([]);
       clearRoutes();
       clearShadows();
 
       try {
-        // 1. Fetch baseline route
         const baseline = await fetchRoute(start, end);
         if (!baseline) {
           throw new Error('No route found');
         }
 
-        // 2. Calculate sun position
         const centerLat = (start.lat + end.lat) / 2;
         const centerLon = (start.lng + end.lng) / 2;
         const sunPos = getSunPosition(centerLat, centerLon, selectedTime);
         setSunDirection(sunPos.azimuth);
-        
-        console.log('Sun position:', sunPos);
 
-        // 3. Fetch building data for the route area
-        const padding = 0.005; // ~500m padding
+        const padding = 0.005;
         const minLat = Math.min(start.lat, end.lat) - padding;
         const maxLat = Math.max(start.lat, end.lat) + padding;
         const minLon = Math.min(start.lng, end.lng) - padding;
         const maxLon = Math.max(start.lng, end.lng) + padding;
         
-        const buildings = await fetchBuildings(minLat, minLon, maxLat, maxLon);
-        console.log('Buildings fetched:', buildings.length);
-        setBuildings(buildings);
+        const buildingsData = await fetchBuildings(minLat, minLon, maxLat, maxLon);
+        setBuildings(buildingsData);
 
-        // 4. Calculate shadows
         const shadows: ShadowPolygon[] = [];
-        buildings.forEach((building) => {
+        buildingsData.forEach((building) => {
           const shadow = projectBuildingShadow(building, sunPos.azimuth, sunPos.elevation);
           if (shadow) shadows.push(shadow);
         });
-        console.log('Shadows calculated:', shadows.length);
 
-        // 5. Calculate sun exposure for baseline
         const baselineExposure = calculateRouteExposure(baseline.coordinates, shadows, sunPos.azimuth);
         baseline.info.sunExposure = baselineExposure;
 
-        // 6. Generate SHADE-AWARE waypoints
-        // The key insight: we want waypoints on the SHADED SIDE of streets
-        // Shadow direction is opposite to sun direction
         const shadowDirection = (sunPos.azimuth + 180) % 360;
         const shadowRad = shadowDirection * Math.PI / 180;
         
-        // Perpendicular to route direction (to hit side streets)
         const routeDx = end.lng - start.lng;
         const routeDy = end.lat - start.lat;
-        const routeLength = Math.sqrt(routeDx * routeDx + routeDy * routeDy);
         const routeAngle = Math.atan2(routeDy, routeDx);
         
         const alternatives: RouteData[] = [];
         const latDegPerKm = 1 / 111;
         const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
         
-        // Generate waypoints specifically on the SHADED SIDE
-        // Offset perpendicular to the sun direction (which is the shaded side)
         const perpendicularToSun = shadowRad + Math.PI / 2;
         
-        // Create waypoints along the route, offset to the shaded side
         const numSegments = 5;
-        const sideOffsets = [0.15, 0.25, 0.35, 0.5]; // 150m, 250m, 350m, 500m to the side
+        const sideOffsets = [0.15, 0.25, 0.35, 0.5];
         
         for (const sideOffset of sideOffsets) {
           for (let i = 1; i < numSegments; i++) {
@@ -680,7 +689,6 @@ function App() {
             const baseLng = start.lng + (end.lng - start.lng) * t;
             const baseLat = start.lat + (end.lat - start.lat) * t;
             
-            // Offset to the SHADED side (perpendicular to sun)
             const waypoint = {
               lng: baseLng + Math.cos(perpendicularToSun) * sideOffset * lngDegPerKm,
               lat: baseLat + Math.sin(perpendicularToSun) * sideOffset * latDegPerKm,
@@ -693,7 +701,6 @@ function App() {
               alternatives.push(route);
             }
             
-            // Also try the opposite side (for comparison)
             const oppositeWaypoint = {
               lng: baseLng - Math.cos(perpendicularToSun) * sideOffset * lngDegPerKm,
               lat: baseLat - Math.sin(perpendicularToSun) * sideOffset * latDegPerKm,
@@ -708,8 +715,6 @@ function App() {
           }
         }
         
-        // Also try: route that goes THROUGH the shadow zone
-        // Add a waypoint that's directly in the shadow direction from the midpoint
         const midpointShadow = {
           lng: centerLon + Math.cos(shadowRad) * 0.3 * lngDegPerKm,
           lat: centerLat + Math.sin(shadowRad) * 0.3 * latDegPerKm,
@@ -722,11 +727,6 @@ function App() {
           alternatives.push(routeShadow);
         }
         
-        console.log('Alternatives generated:', alternatives.length);
-        console.log('Shadow direction:', shadowDirection);
-        console.log('Sun direction:', sunPos.azimuth);
-
-        // 7. Pick the shadiest route
         let shadiestRoute = baseline;
         let minExposure = baselineExposure;
         
@@ -737,7 +737,6 @@ function App() {
           }
         });
 
-        // 8. Create final route data
         const allRoutes: RouteData[] = [
           {
             ...baseline,
@@ -755,13 +754,19 @@ function App() {
 
         setRoutes(allRoutes);
 
-        // Log which route was chosen
-        console.log('Baseline exposure:', baselineExposure.toFixed(3));
-        console.log('Shadiest exposure:', minExposure.toFixed(3));
-        console.log('Same route?', baseline.coordinates.length === shadiestRoute.coordinates.length && 
-          baseline.coordinates[0][0] === shadiestRoute.coordinates[0][0]);
+        // Generate detailed analysis
+        const baselineAnalysis = analyzeRoute(baseline, shadows, sunPos.azimuth, buildingsData);
+        baselineAnalysis.alternativesConsidered = alternatives.length + 1;
+        baselineAnalysis.chosenReason = 'Shortest path';
+        
+        const shadiestAnalysis = analyzeRoute(shadiestRoute, shadows, sunPos.azimuth, buildingsData);
+        shadiestAnalysis.alternativesConsidered = alternatives.length + 1;
+        shadiestAnalysis.chosenReason = minExposure < baselineExposure 
+          ? `Lower sun exposure (${(minExposure * 100).toFixed(1)}% vs ${(baselineExposure * 100).toFixed(1)}%)`
+          : 'Same as baseline (no better alternative found)';
+        
+        setRouteAnalysis([baselineAnalysis, shadiestAnalysis]);
 
-        // 9. Draw routes on map
         const map = mapRef.current;
         if (map) {
           const allBounds = new maplibregl.LngLatBounds();
@@ -803,12 +808,10 @@ function App() {
             });
           });
 
-          // Draw shadow polygons if enabled (only for tall buildings, very transparent)
           if (showShadows && shadows.length > 0) {
             const significantShadows = shadows.filter((s) => {
-              // Only show shadows for buildings taller than 20m
               const footprint = s.footprint;
-              const building = buildings.find((b) => b.footprint === footprint);
+              const building = buildingsData.find((b) => b.footprint === footprint);
               return building && building.height > 20;
             });
 
@@ -860,6 +863,7 @@ function App() {
     setStart(null);
     setEnd(null);
     setRoutes([]);
+    setRouteAnalysis([]);
     setBuildings([]);
     setSunDirection(null);
     setError(null);
@@ -905,6 +909,15 @@ function App() {
             />
             Show Heatmap
           </label>
+          <label className="shadow-toggle">
+            <input
+              type="checkbox"
+              checked={showAnalysis}
+              onChange={(e) => setShowAnalysis(e.target.checked)}
+              disabled={loading}
+            />
+            Show Analysis
+          </label>
         </div>
         <div className="status">
           {loading ? (
@@ -918,55 +931,158 @@ function App() {
         </button>
       </div>
 
-      <div className="map-wrap">
-        <div ref={mapContainer} className="map-container" />
+      <div className="main-content">
+        <div className="map-wrap">
+          <div ref={mapContainer} className="map-container" />
 
-        {routes.length > 0 && (
-          <div className="legend-panel">
-            <div className="legend-title">Route Comparison</div>
-            {sunDirection !== null && (
-              <div className="legend-row">
-                <span className="legend-label">Sun Direction:</span>
-                <span className="legend-info">{sunDirection.toFixed(0)}°</span>
+          {routes.length > 0 && (
+            <div className="legend-panel">
+              <div className="legend-title">Route Comparison</div>
+              {sunDirection !== null && (
+                <div className="legend-row">
+                  <span className="legend-label">Sun Direction:</span>
+                  <span className="legend-info">{sunDirection.toFixed(0)}°</span>
+                </div>
+              )}
+              <div className="legend-divider" />
+              {routes.map((route) => (
+                <div key={route.id} className="legend-item">
+                  <div className="legend-color" style={{ backgroundColor: route.color }} />
+                  <span className="legend-label">{route.label}</span>
+                  <span className="legend-info">
+                    {Math.round(route.info.duration / 60)} min | {(route.info.distance / 1000).toFixed(2)} km
+                  </span>
+                </div>
+              ))}
+              <div className="legend-divider" />
+              {routes.length > 1 && (
+                <div className="legend-comparison">
+                  <div className="legend-row">
+                    <span className="legend-label">Sun Exposure:</span>
+                  </div>
+                  {routes.map((route) => (
+                    <div key={route.id} className="legend-row">
+                      <span className="legend-label" style={{ color: route.color }}>
+                        {route.label.split(' (')[0]}
+                      </span>
+                      <span className="legend-info">
+                        {(route.info.sunExposure * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {error && (
+            <div className="route-panel error">
+              <div className="panel-row">
+                <span className="label">Error</span>
+                <span className="value">{error}</span>
               </div>
-            )}
-            <div className="legend-divider" />
-            {routes.map((route) => (
-              <div key={route.id} className="legend-item">
-                <div className="legend-color" style={{ backgroundColor: route.color }} />
-                <span className="legend-label">{route.label}</span>
-                <span className="legend-info">
-                  {Math.round(route.info.duration / 60)} min | {(route.info.distance / 1000).toFixed(2)} km
-                </span>
+            </div>
+          )}
+        </div>
+
+        {showAnalysis && routeAnalysis.length > 0 && (
+          <div className="analysis-panel">
+            <div className="analysis-title">Route Analysis</div>
+            {routeAnalysis.map((analysis) => (
+              <div key={analysis.routeId} className="analysis-section">
+                <div className="analysis-route-header" style={{ color: analysis.routeId === 'fastest' ? '#aa3bff' : '#22c55e' }}>
+                  {analysis.label}
+                </div>
+                
+                <div className="analysis-stats">
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Distance:</span>
+                    <span className="analysis-value">{(analysis.totalDistance / 1000).toFixed(2)} km</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Duration:</span>
+                    <span className="analysis-value">{Math.round(analysis.totalDuration / 60)} min</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Sun Exposure:</span>
+                    <span className="analysis-value">{(analysis.sunExposure * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Buildings Passed:</span>
+                    <span className="analysis-value">{analysis.buildingsPassed.length}</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Shadow Coverage:</span>
+                    <span className="analysis-value">{(analysis.shadowCoverage * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Side Shade Score:</span>
+                    <span className="analysis-value">{analysis.sideShadeScore.toFixed(1)}</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Alternatives:</span>
+                    <span className="analysis-value">{analysis.alternativesConsidered}</span>
+                  </div>
+                </div>
+                
+                <div className="analysis-reason">
+                  <span className="analysis-label">Why chosen:</span>
+                  <span className="analysis-value">{analysis.chosenReason}</span>
+                </div>
+                
+                <div className="analysis-divider" />
+                
+                <div className="analysis-segments-title">Segment Breakdown</div>
+                <div className="analysis-segments">
+                  {analysis.segments.slice(0, 5).map((segment) => (
+                    <div key={segment.segmentIndex} className="analysis-segment">
+                      <div className="segment-header">
+                        <span>Seg {segment.segmentIndex + 1}</span>
+                        <span>{segment.length.toFixed(0)}m</span>
+                      </div>
+                      <div className="segment-details">
+                        <span>{segment.isEastWest ? 'E-W' : segment.isNorthSouth ? 'N-S' : 'Diag'}</span>
+                        <span className={segment.exposureScore < 0.5 ? 'segment-good' : 'segment-bad'}>
+                          {(segment.exposureScore * 100).toFixed(0)}% exposed
+                        </span>
+                      </div>
+                      <div className="segment-bar">
+                        <div 
+                          className="segment-fill" 
+                          style={{ 
+                            width: `${segment.exposureScore * 100}%`,
+                            backgroundColor: segment.exposureScore < 0.5 ? '#22c55e' : '#ef4444'
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  {analysis.segments.length > 5 && (
+                    <div className="analysis-more">
+                      ...and {analysis.segments.length - 5} more segments
+                    </div>
+                  )}
+                </div>
+                
+                <div className="analysis-divider" />
+                
+                <div className="analysis-buildings-title">Buildings Passed</div>
+                <div className="analysis-buildings">
+                  {analysis.buildingsPassed.slice(0, 5).map((building) => (
+                    <div key={building.id} className="analysis-building">
+                      <span className="building-id">Bldg {building.id}</span>
+                      <span className="building-height">{building.height.toFixed(1)}m</span>
+                      <span className="building-levels">{building.levels} floors</span>
+                    </div>
+                  ))}
+                  {analysis.buildingsPassed.length > 5 && (
+                    <div className="analysis-more">
+                      ...and {analysis.buildingsPassed.length - 5} more buildings
+                    </div>
+                  )}
+                </div>
               </div>
             ))}
-            <div className="legend-divider" />
-            {routes.length > 1 && (
-              <div className="legend-comparison">
-                <div className="legend-row">
-                  <span className="legend-label">Sun Exposure:</span>
-                </div>
-                {routes.map((route) => (
-                  <div key={route.id} className="legend-row">
-                    <span className="legend-label" style={{ color: route.color }}>
-                      {route.label.split(' (')[0]}
-                    </span>
-                    <span className="legend-info">
-                      {(route.info.sunExposure * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {error && (
-          <div className="route-panel error">
-            <div className="panel-row">
-              <span className="label">Error</span>
-              <span className="value">{error}</span>
-            </div>
           </div>
         )}
       </div>
