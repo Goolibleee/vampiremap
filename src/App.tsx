@@ -370,6 +370,7 @@ function App() {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [buildings, setBuildings] = useState<Building[]>([]);
   const heatmapLayersRef = useRef<string[]>([]);
+  const heatmapIdCounter = useRef(0);
 
   const clearMarkers = () => {
     markersRef.current.forEach((m) => m.remove());
@@ -412,7 +413,7 @@ function App() {
 
     clearHeatmap();
 
-    const features = buildingsToDraw.map((building, index) => ({
+    const features = buildingsToDraw.map((building) => ({
       type: 'Feature',
       properties: {
         height: building.height,
@@ -424,7 +425,7 @@ function App() {
       },
     }));
 
-    const sourceId = 'building-heatmap';
+    const sourceId = `heatmap-${heatmapIdCounter.current++}`;
     
     map.addSource(sourceId, {
       type: 'geojson',
@@ -444,9 +445,9 @@ function App() {
       },
     });
 
-    // Add outlines
+    const outlineId = `${sourceId}-outline`;
     map.addLayer({
-      id: `${sourceId}-outline`,
+      id: outlineId,
       type: 'line',
       source: sourceId,
       paint: {
@@ -457,7 +458,7 @@ function App() {
     });
 
     heatmapLayersRef.current.push(sourceId);
-    heatmapLayersRef.current.push(`${sourceId}-outline`);
+    heatmapLayersRef.current.push(outlineId);
   };
 
   const handleMapClick = (lng: number, lat: number) => {
@@ -551,6 +552,9 @@ function App() {
     } else {
       clearHeatmap();
     }
+    return () => {
+      clearHeatmap();
+    };
   }, [showHeatmap, buildings]);
 
   useEffect(() => {
@@ -601,28 +605,49 @@ function App() {
         baseline.info.sunExposure = baselineExposure;
 
         // 6. Try to find alternative routes with different waypoints
-        // Generate waypoints in a grid around the route
+        // Generate more diverse waypoints to create meaningful detours
         const alternatives: RouteData[] = [];
-        const numAlternatives = 8;
         
-        for (let i = 0; i < numAlternatives; i++) {
-          const angle = (i / numAlternatives) * 2 * Math.PI;
-          const offset = 0.3; // 300m offset
-          const latDegPerKm = 1 / 111;
-          const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
-          
-          const waypoint = {
-            lng: centerLon + Math.cos(angle) * offset * lngDegPerKm,
-            lat: centerLat + Math.sin(angle) * offset * latDegPerKm,
-          };
-          
-          const route = await fetchRoute(start, end, [waypoint]);
-          if (route) {
-            const exposure = calculateRouteExposure(route.coordinates, shadows);
-            route.info.sunExposure = exposure;
-            alternatives.push(route);
+        // Create waypoints at different distances and angles
+        const offsets = [0.4, 0.6, 0.8, 1.0]; // 400m, 600m, 800m, 1000m
+        const numAngles = 6;
+        
+        for (const offset of offsets) {
+          for (let i = 0; i < numAngles; i++) {
+            const angle = (i / numAngles) * 2 * Math.PI;
+            const latDegPerKm = 1 / 111;
+            const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
+            
+            const waypoint = {
+              lng: centerLon + Math.cos(angle) * offset * lngDegPerKm,
+              lat: centerLat + Math.sin(angle) * offset * latDegPerKm,
+            };
+            
+            // Try with single waypoint
+            const route1 = await fetchRoute(start, end, [waypoint]);
+            if (route1) {
+              const exposure1 = calculateRouteExposure(route1.coordinates, shadows);
+              route1.info.sunExposure = exposure1;
+              alternatives.push(route1);
+            }
+            
+            // Also try with a second waypoint on the other side to create a loop
+            const oppositeAngle = angle + Math.PI;
+            const waypoint2 = {
+              lng: centerLon + Math.cos(oppositeAngle) * (offset * 0.5) * lngDegPerKm,
+              lat: centerLat + Math.sin(oppositeAngle) * (offset * 0.5) * latDegPerKm,
+            };
+            
+            const route2 = await fetchRoute(start, end, [waypoint, waypoint2]);
+            if (route2) {
+              const exposure2 = calculateRouteExposure(route2.coordinates, shadows);
+              route2.info.sunExposure = exposure2;
+              alternatives.push(route2);
+            }
           }
         }
+        
+        console.log('Alternatives generated:', alternatives.length);
 
         // 7. Pick the shadiest route
         let shadiestRoute = baseline;
@@ -695,9 +720,16 @@ function App() {
             });
           });
 
-          // Draw shadow polygons if enabled
+          // Draw shadow polygons if enabled (only for tall buildings, very transparent)
           if (showShadows && shadows.length > 0) {
-            shadows.forEach((shadow, index) => {
+            const significantShadows = shadows.filter((s) => {
+              // Only show shadows for buildings taller than 20m
+              const footprint = s.footprint;
+              const building = buildings.find((b) => b.footprint === footprint);
+              return building && building.height > 20;
+            });
+
+            significantShadows.forEach((shadow, index) => {
               const shadowId = `shadow-${index}`;
               map.addSource(shadowId, {
                 type: 'geojson',
@@ -717,7 +749,7 @@ function App() {
                 source: shadowId,
                 paint: {
                   'fill-color': '#000000',
-                  'fill-opacity': 0.2,
+                  'fill-opacity': 0.05,
                 },
               });
 
