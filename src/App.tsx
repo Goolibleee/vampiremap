@@ -405,6 +405,96 @@ function analyzeRoute(
 function latDegPerKm() { return 1 / 111; }
 function lngDegPerKm(lat: number) { return 1 / (111 * Math.cos(lat * Math.PI / 180)); }
 
+// Calculate total sun exposure for a route
+function calculateRouteExposure(
+  coordinates: [number, number][],
+  shadows: ShadowPolygon[],
+  sunAzimuth?: number
+): number {
+  let totalExposure = 0;
+  let totalLength = 0;
+  
+  for (let i = 1; i < coordinates.length; i++) {
+    const p1 = coordinates[i - 1];
+    const p2 = coordinates[i];
+    
+    // Calculate segment length
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const latDegPerKm = 1 / 111;
+    const lngDegPerKm = 1 / (111 * Math.cos(((p1[1] + p2[1]) / 2) * Math.PI / 180));
+    const length = Math.sqrt(Math.pow(dx / lngDegPerKm, 2) + Math.pow(dy / latDegPerKm, 2));
+    
+    const exposure = calculateSegmentExposure(p1, p2, shadows, sunAzimuth);
+    totalExposure += exposure * length;
+    totalLength += length;
+  }
+  
+  return totalLength > 0 ? totalExposure / totalLength : 0;
+}
+
+// Calculate sun exposure for a route segment
+function calculateSegmentExposure(
+  p1: [number, number],
+  p2: [number, number],
+  shadows: ShadowPolygon[],
+  sunAzimuth?: number
+): number {
+  // Sample points along the segment
+  const samples = 5;
+  let exposedCount = 0;
+  
+  // Calculate side-of-street shade if sun azimuth is provided
+  let sideShadeFactor = 0;
+  if (sunAzimuth !== undefined) {
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const segmentHeading = Math.atan2(dy, dx) * 180 / Math.PI;
+    
+    // Check if street is roughly E-W or N-S
+    const isEastWest = Math.abs(Math.sin(segmentHeading * Math.PI / 180)) > 0.7;
+    const isNorthSouth = Math.abs(Math.cos(segmentHeading * Math.PI / 180)) > 0.7;
+    
+    // Determine which side is shaded based on sun direction
+    const sunFromNorth = sunAzimuth < 45 || sunAzimuth > 315;
+    const sunFromSouth = sunAzimuth > 135 && sunAzimuth < 225;
+    const sunFromEast = sunAzimuth > 45 && sunAzimuth < 135;
+    const sunFromWest = sunAzimuth > 225 && sunAzimuth < 315;
+    
+    if (isEastWest && (sunFromNorth || sunFromSouth)) {
+      sideShadeFactor = 0.5; // One side is shaded
+    } else if (isNorthSouth && (sunFromEast || sunFromWest)) {
+      sideShadeFactor = 0.5; // One side is shaded
+    }
+  }
+  
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const point: [number, number] = [
+      p1[0] + (p2[0] - p1[0]) * t,
+      p1[1] + (p2[1] - p1[1]) * t,
+    ];
+    
+    let inShadow = false;
+    for (const shadow of shadows) {
+      if (pointInPolygon(point, shadow.shadow)) {
+        inShadow = true;
+        break;
+      }
+    }
+    
+    // If not in building shadow, check if on shaded side of street
+    if (!inShadow && sideShadeFactor > 0) {
+      // Reduce exposure by sideShadeFactor
+      exposedCount += (1 - sideShadeFactor);
+    } else if (!inShadow) {
+      exposedCount++;
+    }
+  }
+  
+  return exposedCount / (samples + 1);
+}
+
 // Convert building height to heatmap color
 function heightToColor(height: number): string {
   const minHeight = 5;
