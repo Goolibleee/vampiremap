@@ -122,6 +122,8 @@ async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Pr
       { lon: end.lng, lat: end.lat },
     ];
 
+    console.log('Fetching route with', locations.length, 'locations');
+
     const res = await fetch(VALHALLA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -132,8 +134,10 @@ async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Pr
     });
 
     const data = await res.json();
+    console.log('Valhalla response:', data);
 
     if (!data.trip || !data.trip.legs || data.trip.legs.length === 0) {
+      console.error('No route found in response:', data);
       return null;
     }
 
@@ -160,7 +164,8 @@ async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Pr
         sunExposure: 0,
       },
     };
-  } catch {
+  } catch (err) {
+    console.error('Route fetch error:', err);
     return null;
   }
 }
