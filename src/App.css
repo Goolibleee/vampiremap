@@ -358,7 +358,21 @@ html, body, #root {
   justify-content: space-between;
   font-size: 11px;
   color: #6b6375;
+  margin-bottom: 2px;
+}
+
+.segment-shade-details {
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  color: #9ca3af;
   margin-bottom: 4px;
+}
+
+.segment-shade-item {
+  background: #f4f3ec;
+  padding: 1px 4px;
+  border-radius: 3px;
 }
 
 .segment-good {
@@ -519,5 +533,8 @@ html, body, #root {
   }
   .building-height {
     color: #f3f4f6;
+  }
+  .segment-shade-item {
+    background: #2e303a;
   }
 }

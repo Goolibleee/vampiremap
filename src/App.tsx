@@ -56,6 +56,8 @@ interface RouteAnalysis {
   segments: SegmentAnalysis[];
   buildingsPassed: Building[];
   shadowCoverage: number;
+  effectiveShadeCoverage: number;
+  buildingShadowCoverage: number;
   sideShadeScore: number;
   alternativesConsidered: number;
   chosenReason: string;
@@ -294,25 +296,6 @@ function analyzeSegment(
   const isEastWest = Math.abs(Math.sin(heading * Math.PI / 180)) > 0.7;
   const isNorthSouth = Math.abs(Math.cos(heading * Math.PI / 180)) > 0.7;
   
-  // Sample points
-  const samples = 5;
-  let shadowHits = 0;
-  
-  for (let i = 0; i <= samples; i++) {
-    const t = i / samples;
-    const point: [number, number] = [
-      p1[0] + (p2[0] - p1[0]) * t,
-      p1[1] + (p2[1] - p1[1]) * t,
-    ];
-    
-    for (const shadow of shadows) {
-      if (pointInPolygon(point, shadow.shadow)) {
-        shadowHits++;
-        break;
-      }
-    }
-  }
-  
   // Side shade factor
   let sideShadeFactor = 0;
   const sunFromNorth = sunAzimuth < 45 || sunAzimuth > 315;
@@ -326,9 +309,41 @@ function analyzeSegment(
     sideShadeFactor = 0.5;
   }
   
-  const exposedCount = (samples + 1) - shadowHits;
-  const baseExposure = exposedCount / (samples + 1);
-  const exposureScore = baseExposure * (1 - sideShadeFactor * 0.3);
+  // Sample points
+  const samples = 5;
+  let shadowHits = 0;
+  let sideShadeHits = 0;
+  
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const point: [number, number] = [
+      p1[0] + (p2[0] - p1[0]) * t,
+      p1[1] + (p2[1] - p1[1]) * t,
+    ];
+    
+    let inShadow = false;
+    for (const shadow of shadows) {
+      if (pointInPolygon(point, shadow.shadow)) {
+        inShadow = true;
+        shadowHits++;
+        break;
+      }
+    }
+    
+    if (!inShadow && sideShadeFactor > 0) {
+      sideShadeHits++;
+    }
+  }
+  
+  // Calculate exposure properly: 
+  // Points in building shadow = 0 exposure
+  // Points on shaded side of street = 0.5 exposure
+  // Points on sunny side = 1.0 exposure
+  const totalPoints = samples + 1;
+  const exposedFromShadow = totalPoints - shadowHits; // Points not in shadow
+  const sideShadeReduction = sideShadeHits * sideShadeFactor; // 0.5 * count
+  const totalExposed = exposedFromShadow - sideShadeReduction;
+  const exposureScore = totalExposed / totalPoints;
   
   return {
     segmentIndex: 0,
@@ -336,10 +351,10 @@ function analyzeSegment(
     heading,
     isEastWest,
     isNorthSouth,
-    samplePoints: samples + 1,
+    samplePoints: totalPoints,
     shadowHits,
     sideShadeFactor,
-    exposureScore,
+    exposureScore: Math.max(0, exposureScore), // Clamp to 0
   };
 }
 
@@ -384,7 +399,12 @@ function analyzeRoute(
     }
   }
   
-  const shadowCoverage = totalSamples > 0 ? totalShadowHits / totalSamples : 0;
+  // Calculate effective shade coverage: points in building shadow + points on shaded side
+  const totalShadeHits = segments.reduce((sum, s) => {
+    return sum + s.shadowHits + (s.samplePoints - s.shadowHits) * s.sideShadeFactor;
+  }, 0);
+  const effectiveShadeCoverage = totalSamples > 0 ? totalShadeHits / totalSamples : 0;
+  const buildingShadowCoverage = totalSamples > 0 ? totalShadowHits / totalSamples : 0;
   const uniqueBuildings = buildings.filter(b => buildingsPassed.has(b.id));
   
   return {
@@ -395,7 +415,9 @@ function analyzeRoute(
     sunExposure: route.info.sunExposure,
     segments,
     buildingsPassed: uniqueBuildings,
-    shadowCoverage,
+    shadowCoverage: effectiveShadeCoverage,
+    effectiveShadeCoverage,
+    buildingShadowCoverage,
     sideShadeScore,
     alternativesConsidered: 0,
     chosenReason: '',
@@ -1102,8 +1124,16 @@ function App() {
                     <span className="analysis-value">{analysis.buildingsPassed.length}</span>
                   </div>
                   <div className="analysis-stat">
-                    <span className="analysis-label">Shadow Coverage:</span>
-                    <span className="analysis-value">{(analysis.shadowCoverage * 100).toFixed(1)}%</span>
+                    <span className="analysis-label">Total Shade:</span>
+                    <span className="analysis-value">{(analysis.effectiveShadeCoverage * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Building Shade:</span>
+                    <span className="analysis-value">{(analysis.buildingShadowCoverage * 100).toFixed(1)}%</span>
+                  </div>
+                  <div className="analysis-stat">
+                    <span className="analysis-label">Side Shade:</span>
+                    <span className="analysis-value">{((analysis.effectiveShadeCoverage - analysis.buildingShadowCoverage) * 100).toFixed(1)}%</span>
                   </div>
                   <div className="analysis-stat">
                     <span className="analysis-label">Side Shade Score:</span>
@@ -1130,10 +1160,21 @@ function App() {
                         <span>Seg {segment.segmentIndex + 1}</span>
                         <span>{segment.length.toFixed(0)}m</span>
                       </div>
-                      <div className="segment-details">
+                       <div className="segment-details">
                         <span>{segment.isEastWest ? 'E-W' : segment.isNorthSouth ? 'N-S' : 'Diag'}</span>
                         <span className={segment.exposureScore < 0.5 ? 'segment-good' : 'segment-bad'}>
-                          {(segment.exposureScore * 100).toFixed(0)}% exposed
+                          {(segment.exposureScore * 100).toFixed(0)}% sun
+                        </span>
+                      </div>
+                      <div className="segment-shade-details">
+                        <span className="segment-shade-item">
+                          Bldg: {segment.shadowHits}/{segment.samplePoints}
+                        </span>
+                        <span className="segment-shade-item">
+                          Side: {segment.sideShadeFactor > 0 ? 'Yes' : 'No'}
+                        </span>
+                        <span className="segment-shade-item">
+                          Shade: {((1 - segment.exposureScore) * 100).toFixed(0)}%
                         </span>
                       </div>
                       <div className="segment-bar">
