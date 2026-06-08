@@ -280,14 +280,50 @@ function segmentsIntersect(
 }
 
 // Calculate sun exposure for a route segment
+// KEY: Also check side-of-street shade
 function calculateSegmentExposure(
   p1: [number, number],
   p2: [number, number],
-  shadows: ShadowPolygon[]
+  shadows: ShadowPolygon[],
+  sunAzimuth?: number
 ): number {
   // Sample points along the segment
   const samples = 5;
   let exposedCount = 0;
+  
+  // Calculate side-of-street shade if sun azimuth is provided
+  let sideShadeFactor = 0;
+  if (sunAzimuth !== undefined) {
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const segmentHeading = Math.atan2(dy, dx) * 180 / Math.PI;
+    
+    // For a street, one side is shaded, the other is sunny
+    // The shaded side depends on street orientation and sun direction
+    // If street is E-W (heading ~90 or 270), and sun is from north (azimuth ~0), south side is shaded
+    // If street is N-S (heading ~0 or 180), and sun is from east (azimuth ~90), west side is shaded
+    
+    // Check if street is roughly E-W or N-S
+    const isEastWest = Math.abs(Math.sin(segmentHeading * Math.PI / 180)) > 0.7;
+    const isNorthSouth = Math.abs(Math.cos(segmentHeading * Math.PI / 180)) > 0.7;
+    
+    // Determine which side is shaded based on sun direction
+    // North sun (azimuth ~0-45 or ~315-360): south side of E-W streets is shaded
+    // South sun (azimuth ~135-225): north side of E-W streets is shaded
+    // East sun (azimuth ~45-135): west side of N-S streets is shaded
+    // West sun (azimuth ~225-315): east side of N-S streets is shaded
+    
+    const sunFromNorth = sunAzimuth < 45 || sunAzimuth > 315;
+    const sunFromSouth = sunAzimuth > 135 && sunAzimuth < 225;
+    const sunFromEast = sunAzimuth > 45 && sunAzimuth < 135;
+    const sunFromWest = sunAzimuth > 225 && sunAzimuth < 315;
+    
+    if (isEastWest && (sunFromNorth || sunFromSouth)) {
+      sideShadeFactor = 0.5; // One side is shaded
+    } else if (isNorthSouth && (sunFromEast || sunFromWest)) {
+      sideShadeFactor = 0.5; // One side is shaded
+    }
+  }
   
   for (let i = 0; i <= samples; i++) {
     const t = i / samples;
@@ -304,7 +340,14 @@ function calculateSegmentExposure(
       }
     }
     
-    if (!inShadow) exposedCount++;
+    // If not in building shadow, check if on shaded side of street
+    if (!inShadow && sideShadeFactor > 0) {
+      // Randomly assign shade (in reality, we'd know which side we're on)
+      // For now, we reduce exposure by the sideShadeFactor
+      exposedCount += (1 - sideShadeFactor);
+    } else if (!inShadow) {
+      exposedCount++;
+    }
   }
   
   return exposedCount / (samples + 1);
@@ -327,7 +370,8 @@ function heightToColor(height: number): string {
 // Calculate total sun exposure for a route
 function calculateRouteExposure(
   coordinates: [number, number][],
-  shadows: ShadowPolygon[]
+  shadows: ShadowPolygon[],
+  sunAzimuth?: number
 ): number {
   let totalExposure = 0;
   let totalLength = 0;
@@ -343,7 +387,7 @@ function calculateRouteExposure(
     const lngDegPerKm = 1 / (111 * Math.cos(((p1[1] + p2[1]) / 2) * Math.PI / 180));
     const length = Math.sqrt(Math.pow(dx / lngDegPerKm, 2) + Math.pow(dy / latDegPerKm, 2));
     
-    const exposure = calculateSegmentExposure(p1, p2, shadows);
+    const exposure = calculateSegmentExposure(p1, p2, shadows, sunAzimuth);
     totalExposure += exposure * length;
     totalLength += length;
   }
@@ -369,6 +413,7 @@ function App() {
   const [showShadows, setShowShadows] = useState(false);
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [buildings, setBuildings] = useState<Building[]>([]);
+  const [sunDirection, setSunDirection] = useState<number | null>(null);
   const heatmapLayersRef = useRef<string[]>([]);
   const heatmapIdCounter = useRef(0);
 
@@ -578,6 +623,7 @@ function App() {
         const centerLat = (start.lat + end.lat) / 2;
         const centerLon = (start.lng + end.lng) / 2;
         const sunPos = getSunPosition(centerLat, centerLon, selectedTime);
+        setSunDirection(sunPos.azimuth);
         
         console.log('Sun position:', sunPos);
 
@@ -601,53 +647,84 @@ function App() {
         console.log('Shadows calculated:', shadows.length);
 
         // 5. Calculate sun exposure for baseline
-        const baselineExposure = calculateRouteExposure(baseline.coordinates, shadows);
+        const baselineExposure = calculateRouteExposure(baseline.coordinates, shadows, sunPos.azimuth);
         baseline.info.sunExposure = baselineExposure;
 
-        // 6. Try to find alternative routes with different waypoints
-        // Generate more diverse waypoints to create meaningful detours
+        // 6. Generate SHADE-AWARE waypoints
+        // The key insight: we want waypoints on the SHADED SIDE of streets
+        // Shadow direction is opposite to sun direction
+        const shadowDirection = (sunPos.azimuth + 180) % 360;
+        const shadowRad = shadowDirection * Math.PI / 180;
+        
+        // Perpendicular to route direction (to hit side streets)
+        const routeDx = end.lng - start.lng;
+        const routeDy = end.lat - start.lat;
+        const routeLength = Math.sqrt(routeDx * routeDx + routeDy * routeDy);
+        const routeAngle = Math.atan2(routeDy, routeDx);
+        
         const alternatives: RouteData[] = [];
+        const latDegPerKm = 1 / 111;
+        const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
         
-        // Create waypoints at different distances and angles
-        const offsets = [0.4, 0.6, 0.8, 1.0]; // 400m, 600m, 800m, 1000m
-        const numAngles = 6;
+        // Generate waypoints specifically on the SHADED SIDE
+        // Offset perpendicular to the sun direction (which is the shaded side)
+        const perpendicularToSun = shadowRad + Math.PI / 2;
         
-        for (const offset of offsets) {
-          for (let i = 0; i < numAngles; i++) {
-            const angle = (i / numAngles) * 2 * Math.PI;
-            const latDegPerKm = 1 / 111;
-            const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
+        // Create waypoints along the route, offset to the shaded side
+        const numSegments = 5;
+        const sideOffsets = [0.15, 0.25, 0.35, 0.5]; // 150m, 250m, 350m, 500m to the side
+        
+        for (const sideOffset of sideOffsets) {
+          for (let i = 1; i < numSegments; i++) {
+            const t = i / numSegments;
+            const baseLng = start.lng + (end.lng - start.lng) * t;
+            const baseLat = start.lat + (end.lat - start.lat) * t;
             
+            // Offset to the SHADED side (perpendicular to sun)
             const waypoint = {
-              lng: centerLon + Math.cos(angle) * offset * lngDegPerKm,
-              lat: centerLat + Math.sin(angle) * offset * latDegPerKm,
+              lng: baseLng + Math.cos(perpendicularToSun) * sideOffset * lngDegPerKm,
+              lat: baseLat + Math.sin(perpendicularToSun) * sideOffset * latDegPerKm,
             };
             
-            // Try with single waypoint
-            const route1 = await fetchRoute(start, end, [waypoint]);
-            if (route1) {
-              const exposure1 = calculateRouteExposure(route1.coordinates, shadows);
-              route1.info.sunExposure = exposure1;
-              alternatives.push(route1);
+            const route = await fetchRoute(start, end, [waypoint]);
+            if (route) {
+              const exposure = calculateRouteExposure(route.coordinates, shadows, sunPos.azimuth);
+              route.info.sunExposure = exposure;
+              alternatives.push(route);
             }
             
-            // Also try with a second waypoint on the other side to create a loop
-            const oppositeAngle = angle + Math.PI;
-            const waypoint2 = {
-              lng: centerLon + Math.cos(oppositeAngle) * (offset * 0.5) * lngDegPerKm,
-              lat: centerLat + Math.sin(oppositeAngle) * (offset * 0.5) * latDegPerKm,
+            // Also try the opposite side (for comparison)
+            const oppositeWaypoint = {
+              lng: baseLng - Math.cos(perpendicularToSun) * sideOffset * lngDegPerKm,
+              lat: baseLat - Math.sin(perpendicularToSun) * sideOffset * latDegPerKm,
             };
             
-            const route2 = await fetchRoute(start, end, [waypoint, waypoint2]);
-            if (route2) {
-              const exposure2 = calculateRouteExposure(route2.coordinates, shadows);
-              route2.info.sunExposure = exposure2;
-              alternatives.push(route2);
+            const routeOpposite = await fetchRoute(start, end, [oppositeWaypoint]);
+            if (routeOpposite) {
+              const exposureOpp = calculateRouteExposure(routeOpposite.coordinates, shadows, sunPos.azimuth);
+              routeOpposite.info.sunExposure = exposureOpp;
+              alternatives.push(routeOpposite);
             }
           }
         }
         
+        // Also try: route that goes THROUGH the shadow zone
+        // Add a waypoint that's directly in the shadow direction from the midpoint
+        const midpointShadow = {
+          lng: centerLon + Math.cos(shadowRad) * 0.3 * lngDegPerKm,
+          lat: centerLat + Math.sin(shadowRad) * 0.3 * latDegPerKm,
+        };
+        
+        const routeShadow = await fetchRoute(start, end, [midpointShadow]);
+        if (routeShadow) {
+          const exposureShadow = calculateRouteExposure(routeShadow.coordinates, shadows, sunPos.azimuth);
+          routeShadow.info.sunExposure = exposureShadow;
+          alternatives.push(routeShadow);
+        }
+        
         console.log('Alternatives generated:', alternatives.length);
+        console.log('Shadow direction:', shadowDirection);
+        console.log('Sun direction:', sunPos.azimuth);
 
         // 7. Pick the shadiest route
         let shadiestRoute = baseline;
@@ -677,6 +754,12 @@ function App() {
         ];
 
         setRoutes(allRoutes);
+
+        // Log which route was chosen
+        console.log('Baseline exposure:', baselineExposure.toFixed(3));
+        console.log('Shadiest exposure:', minExposure.toFixed(3));
+        console.log('Same route?', baseline.coordinates.length === shadiestRoute.coordinates.length && 
+          baseline.coordinates[0][0] === shadiestRoute.coordinates[0][0]);
 
         // 9. Draw routes on map
         const map = mapRef.current;
@@ -778,6 +861,7 @@ function App() {
     setEnd(null);
     setRoutes([]);
     setBuildings([]);
+    setSunDirection(null);
     setError(null);
     setInstruction('Click anywhere on the map to place start');
     clearMarkers();
@@ -840,6 +924,13 @@ function App() {
         {routes.length > 0 && (
           <div className="legend-panel">
             <div className="legend-title">Route Comparison</div>
+            {sunDirection !== null && (
+              <div className="legend-row">
+                <span className="legend-label">Sun Direction:</span>
+                <span className="legend-info">{sunDirection.toFixed(0)}°</span>
+              </div>
+            )}
+            <div className="legend-divider" />
             {routes.map((route) => (
               <div key={route.id} className="legend-item">
                 <div className="legend-color" style={{ backgroundColor: route.color }} />
