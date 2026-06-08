@@ -310,6 +310,20 @@ function calculateSegmentExposure(
   return exposedCount / (samples + 1);
 }
 
+// Convert building height to heatmap color (red = taller)
+function heightToColor(height: number): string {
+  const minHeight = 5;
+  const maxHeight = 100;
+  const normalized = Math.min(1, Math.max(0, (height - minHeight) / (maxHeight - minHeight)));
+  
+  // Red intensity based on height
+  const r = Math.round(255 * normalized);
+  const g = Math.round(50 * (1 - normalized));
+  const b = Math.round(50 * (1 - normalized));
+  
+  return `rgba(${r}, ${g}, ${b}, ${0.3 + 0.4 * normalized})`;
+}
+
 // Calculate total sun exposure for a route
 function calculateRouteExposure(
   coordinates: [number, number][],
@@ -353,6 +367,9 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [instruction, setInstruction] = useState('Click anywhere on the map to place start');
   const [showShadows, setShowShadows] = useState(false);
+  const [showHeatmap, setShowHeatmap] = useState(false);
+  const [buildings, setBuildings] = useState<Building[]>([]);
+  const heatmapLayersRef = useRef<string[]>([]);
 
   const clearMarkers = () => {
     markersRef.current.forEach((m) => m.remove());
@@ -377,6 +394,70 @@ function App() {
       if (map.getSource(id)) map.removeSource(id);
     });
     shadowLayersRef.current = [];
+  };
+
+  const clearHeatmap = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    heatmapLayersRef.current.forEach((id) => {
+      if (map.getLayer(id)) map.removeLayer(id);
+      if (map.getSource(id)) map.removeSource(id);
+    });
+    heatmapLayersRef.current = [];
+  };
+
+  const drawBuildingHeatmap = (buildingsToDraw: Building[]) => {
+    const map = mapRef.current;
+    if (!map || buildingsToDraw.length === 0) return;
+
+    clearHeatmap();
+
+    const features = buildingsToDraw.map((building, index) => ({
+      type: 'Feature',
+      properties: {
+        height: building.height,
+        color: heightToColor(building.height),
+      },
+      geometry: {
+        type: 'Polygon',
+        coordinates: [building.footprint],
+      },
+    }));
+
+    const sourceId = 'building-heatmap';
+    
+    map.addSource(sourceId, {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features,
+      },
+    });
+
+    map.addLayer({
+      id: sourceId,
+      type: 'fill',
+      source: sourceId,
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': 0.6,
+      },
+    });
+
+    // Add outlines
+    map.addLayer({
+      id: `${sourceId}-outline`,
+      type: 'line',
+      source: sourceId,
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': 0.5,
+        'line-opacity': 0.3,
+      },
+    });
+
+    heatmapLayersRef.current.push(sourceId);
+    heatmapLayersRef.current.push(`${sourceId}-outline`);
   };
 
   const handleMapClick = (lng: number, lat: number) => {
@@ -463,6 +544,15 @@ function App() {
     }
   }, [start, end]);
 
+  // Draw heatmap when buildings or showHeatmap changes
+  useEffect(() => {
+    if (showHeatmap && buildings.length > 0) {
+      drawBuildingHeatmap(buildings);
+    } else {
+      clearHeatmap();
+    }
+  }, [showHeatmap, buildings]);
+
   useEffect(() => {
     if (!start || !end) return;
 
@@ -496,6 +586,7 @@ function App() {
         
         const buildings = await fetchBuildings(minLat, minLon, maxLat, maxLon);
         console.log('Buildings fetched:', buildings.length);
+        setBuildings(buildings);
 
         // 4. Calculate shadows
         const shadows: ShadowPolygon[] = [];
@@ -654,11 +745,13 @@ function App() {
     setStart(null);
     setEnd(null);
     setRoutes([]);
+    setBuildings([]);
     setError(null);
     setInstruction('Click anywhere on the map to place start');
     clearMarkers();
     clearRoutes();
     clearShadows();
+    clearHeatmap();
   };
 
   return (
@@ -686,6 +779,15 @@ function App() {
               disabled={loading}
             />
             Show Shadows
+          </label>
+          <label className="shadow-toggle">
+            <input
+              type="checkbox"
+              checked={showHeatmap}
+              onChange={(e) => setShowHeatmap(e.target.checked)}
+              disabled={loading}
+            />
+            Show Heatmap
           </label>
         </div>
         <div className="status">
