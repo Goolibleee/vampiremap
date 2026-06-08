@@ -63,7 +63,7 @@ interface RouteAnalysis {
   chosenReason: string;
 }
 
-const VALHALLA_URL = 'https://valhalla1.openstreetmap.de/route';
+const ROUTING_URL = 'https://router.project-osrm.org/route/v1/foot';
 
 const TIME_OPTIONS = [
   { label: 'Now', value: 'now' },
@@ -113,45 +113,26 @@ function decodePolyline(str: string, precision = 6): [number, number][] {
   return coordinates;
 }
 
-// Fetch a single route from Valhalla
+// Fetch a single route from OSRM
 async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Promise<RouteData | null> {
   try {
-    const locations = [
-      { lon: start.lng, lat: start.lat },
-      ...waypoints.map((wp) => ({ lon: wp.lng, lat: wp.lat })),
-      { lon: end.lng, lat: end.lat },
-    ];
+    const allPoints = [start, ...waypoints, end];
+    const coordsStr = allPoints.map((p) => `${p.lng},${p.lat}`).join(';');
+    
+    const url = `${ROUTING_URL}/${coordsStr}?overview=full&geometries=geojson&steps=false`;
+    console.log('Fetching route:', url);
 
-    console.log('Fetching route with', locations.length, 'locations');
-
-    const res = await fetch(VALHALLA_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        locations,
-        costing: 'pedestrian',
-      }),
-    });
-
+    const res = await fetch(url);
     const data = await res.json();
-    console.log('Valhalla response:', data);
+    console.log('OSRM response:', data);
 
-    if (!data.trip || !data.trip.legs || data.trip.legs.length === 0) {
+    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
       console.error('No route found in response:', data);
       return null;
     }
 
-    const coordinates: [number, number][] = [];
-    data.trip.legs.forEach((leg: any) => {
-      const legCoords = decodePolyline(leg.shape, 6);
-      if (coordinates.length === 0) {
-        coordinates.push(...legCoords);
-      } else {
-        coordinates.push(...legCoords.slice(1));
-      }
-    });
-
-    const summary = data.trip.summary;
+    const route = data.routes[0];
+    const coordinates = route.geometry.coordinates;
 
     return {
       id: 'route',
@@ -159,8 +140,8 @@ async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Pr
       color: '#aa3bff',
       coordinates,
       info: {
-        distance: summary.length * 1000,
-        duration: summary.time,
+        distance: route.distance,
+        duration: route.duration,
         sunExposure: 0,
       },
     };
