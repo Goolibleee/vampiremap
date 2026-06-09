@@ -667,16 +667,16 @@ function App() {
       },
     });
 
-    // Add shadow layer BEFORE the routes so shadows appear underneath
+    // Add shadow layer on top of map tiles so it's visible
     map.addLayer({
       id: sourceId,
       type: 'fill',
       source: sourceId,
       paint: {
-        'fill-color': '#000011',
-        'fill-opacity': 0.25,
+        'fill-color': '#000033',
+        'fill-opacity': 0.3,
       },
-    }, 'osm-layer');
+    });
 
     const outlineId = `${sourceId}-outline`;
     map.addLayer({
@@ -684,11 +684,11 @@ function App() {
       type: 'line',
       source: sourceId,
       paint: {
-        'line-color': '#000033',
+        'line-color': '#000066',
         'line-width': 1,
-        'line-opacity': 0.5,
+        'line-opacity': 0.6,
       },
-    }, 'osm-layer');
+    });
 
     shadowLayersRef.current.push(sourceId);
     shadowLayersRef.current.push(outlineId);
