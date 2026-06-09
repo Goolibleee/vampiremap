@@ -75,45 +75,7 @@ const TIME_OPTIONS = [
   { label: '6 PM', value: '18:00' },
 ];
 
-// Custom polyline decoder (Valhalla uses 6-digit precision)
-function decodePolyline(str: string, precision = 6): [number, number][] {
-  const coordinates: [number, number][] = [];
-  const factor = Math.pow(10, precision);
-  let i = 0;
-  let lat = 0;
-  let lng = 0;
 
-  while (i < str.length) {
-    let byte = 0;
-    let shift = 0;
-    let result = 0;
-
-    do {
-      byte = str.charCodeAt(i++) - 63;
-      result |= (byte & 0x1f) << shift;
-      shift += 5;
-    } while (byte >= 0x20);
-
-    const deltaLat = (result & 1) ? ~(result >> 1) : (result >> 1);
-    lat += deltaLat;
-
-    shift = 0;
-    result = 0;
-
-    do {
-      byte = str.charCodeAt(i++) - 63;
-      result |= (byte & 0x1f) << shift;
-      shift += 5;
-    } while (byte >= 0x20);
-
-    const deltaLng = (result & 1) ? ~(result >> 1) : (result >> 1);
-    lng += deltaLng;
-
-    coordinates.push([lng / factor, lat / factor]);
-  }
-
-  return coordinates;
-}
 
 // Fetch a single route from OSRM
 async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Promise<RouteData | null> {
@@ -273,8 +235,7 @@ function analyzeSegment(
   p1: [number, number],
   p2: [number, number],
   shadows: ShadowPolygon[],
-  sunAzimuth: number,
-  buildings: Building[]
+  sunAzimuth: number
 ): SegmentAnalysis {
   const dx = p2[0] - p1[0];
   const dy = p2[1] - p1[1];
@@ -365,7 +326,7 @@ function analyzeRoute(
     const p1 = route.coordinates[i - 1];
     const p2 = route.coordinates[i];
     
-    const segment = analyzeSegment(p1, p2, shadows, sunAzimuth, buildings);
+    const segment = analyzeSegment(p1, p2, shadows, sunAzimuth);
     segment.segmentIndex = i - 1;
     segments.push(segment);
     
@@ -380,7 +341,7 @@ function analyzeRoute(
       
       const dist = Math.sqrt(
         Math.pow((p1[0] - centerLng) / lngDegPerKm(centerLat), 2) +
-        Math.pow((p1[1] - centerLat) / latDegPerKm, 2)
+        Math.pow((p1[1] - centerLat) / (1 / 111), 2)
       );
       
       if (dist < 0.1) { // Within 100m
@@ -414,7 +375,6 @@ function analyzeRoute(
   };
 }
 
-function latDegPerKm() { return 1 / 111; }
 function lngDegPerKm(lat: number) { return 1 / (111 * Math.cos(lat * Math.PI / 180)); }
 
 // Calculate total sun exposure for a route
@@ -673,8 +633,8 @@ function App() {
       type: 'fill',
       source: sourceId,
       paint: {
-        'fill-color': '#000033',
-        'fill-opacity': 0.3,
+        'fill-color': '#4444ff',
+        'fill-opacity': 0.4,
       },
     });
 
@@ -684,9 +644,9 @@ function App() {
       type: 'line',
       source: sourceId,
       paint: {
-        'line-color': '#000066',
-        'line-width': 1,
-        'line-opacity': 0.6,
+        'line-color': '#6666ff',
+        'line-width': 2,
+        'line-opacity': 0.8,
       },
     });
 
@@ -846,10 +806,6 @@ function App() {
 
         const shadowDirection = (sunPos.azimuth + 180) % 360;
         const shadowRad = shadowDirection * Math.PI / 180;
-        
-        const routeDx = end.lng - start.lng;
-        const routeDy = end.lat - start.lat;
-        const routeAngle = Math.atan2(routeDy, routeDx);
         
         const alternatives: RouteData[] = [];
         const latDegPerKm = 1 / 111;
