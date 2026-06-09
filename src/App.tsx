@@ -866,43 +866,56 @@ function App() {
           route.info.sunExposure = calculateRouteExposure(route.coordinates, allShadows, sunPos.azimuth);
         });
         
-        // Sort by exposure (lowest first)
-        allRoutes.sort((a, b) => a.info.sunExposure - b.info.sunExposure);
+        console.log('All routes scored:', allRoutes.map(r => ({ id: r.id, exposure: r.info.sunExposure, duration: r.info.duration })));
         
-        const baselineExposure = allRoutes[0].info.sunExposure;
-        const shadiestRoute = allRoutes[0];
+        // Find the fastest route (shortest duration) - this is OSRM route-0
+        const fastestRoute = allRoutes[0]; // OSRM returns fastest first
         
-        // 5. Create display routes
+        // Sort by exposure (lowest first) to find shadiest
+        const routesByExposure = [...allRoutes].sort((a, b) => a.info.sunExposure - b.info.sunExposure);
+        const shadiestRoute = routesByExposure[0];
+        
+        console.log('Fastest route:', fastestRoute.id, 'exposure:', fastestRoute.info.sunExposure);
+        console.log('Shadiest route:', shadiestRoute.id, 'exposure:', shadiestRoute.info.sunExposure);
+        console.log('Are they the same?', shadiestRoute.id === fastestRoute.id);
+        
+        // 5. Create display routes - ALWAYS show fastest and shadiest
         const displayRoutes: RouteData[] = [
           {
-            ...baseline,
+            ...fastestRoute,
             id: 'fastest',
             label: 'Fastest Route',
             color: '#aa3bff',
           },
         ];
         
-        // If the shadiest route is different from the fastest, add it
-        if (shadiestRoute.id !== baseline.id) {
+        // Always add the shadiest route as a second option (even if it's the same path)
+        // This lets the user compare the two
+        if (allRoutes.length > 1 && shadiestRoute.id !== fastestRoute.id) {
           displayRoutes.push({
             ...shadiestRoute,
             id: 'shadiest',
             label: `Shadiest Route (${selectedTime})`,
             color: '#22c55e',
           });
+        } else if (allRoutes.length === 1) {
+          console.log('Only 1 route returned by OSRM, no alternatives available');
+        } else {
+          console.log('Shadiest route is the same as fastest');
         }
 
         setRoutes(displayRoutes);
 
         // 6. Generate detailed analysis
-        const baselineAnalysis = analyzeRoute(baseline, allShadows, sunPos.azimuth, buildingsData);
+        const baselineAnalysis = analyzeRoute(fastestRoute, allShadows, sunPos.azimuth, buildingsData);
         baselineAnalysis.alternativesConsidered = allRoutes.length;
         baselineAnalysis.chosenReason = 'Shortest path';
         
         const shadiestAnalysis = analyzeRoute(shadiestRoute, allShadows, sunPos.azimuth, buildingsData);
         shadiestAnalysis.alternativesConsidered = allRoutes.length;
-        shadiestAnalysis.chosenReason = baselineExposure < allRoutes[0].info.sunExposure 
-          ? `Lower sun exposure (${(baselineExposure * 100).toFixed(1)}% vs ${(allRoutes[0].info.sunExposure * 100).toFixed(1)}%)`
+        const exposureDiff = fastestRoute.info.sunExposure - shadiestRoute.info.sunExposure;
+        shadiestAnalysis.chosenReason = exposureDiff > 0.01
+          ? `Lower sun exposure (${(shadiestRoute.info.sunExposure * 100).toFixed(1)}% vs ${(fastestRoute.info.sunExposure * 100).toFixed(1)}%)`
           : 'Same as baseline (no better alternative found)';
         
         setRouteAnalysis([baselineAnalysis, shadiestAnalysis]);
@@ -911,7 +924,7 @@ function App() {
         if (map) {
           const allBounds = new maplibregl.LngLatBounds();
 
-          allRoutes.forEach((route, index) => {
+          displayRoutes.forEach((route, index) => {
             const routeId = `route-${route.id}`;
             
             map.addSource(routeId, {
