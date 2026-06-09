@@ -775,10 +775,12 @@ function App() {
   }, [showHeatmap, buildings]);
 
   useEffect(() => {
-    console.log('Shadow effect triggered:', showShadows, shadows.length);
+    console.log('Shadow effect triggered:', showShadows, 'shadows count:', shadows.length);
     if (showShadows && shadows.length > 0) {
+      console.log('Drawing shadows...');
       drawShadows(shadows);
     } else {
+      console.log('Clearing shadows or no shadows to draw');
       clearShadows();
     }
     return () => {
@@ -807,6 +809,7 @@ function App() {
         const centerLon = (start.lng + end.lng) / 2;
         const sunPos = getSunPosition(centerLat, centerLon, selectedTime);
         setSunDirection(sunPos.azimuth);
+        console.log('Sun position:', sunPos.azimuth, 'elevation:', sunPos.elevation);
 
         const padding = 0.008; // ~800m padding
         const minLat = Math.min(start.lat, end.lat) - padding;
@@ -833,12 +836,18 @@ function App() {
         setBuildings(buildingsData);
 
         const allShadows: ShadowPolygon[] = [];
+        let nullCount = 0;
         buildingsData.forEach((building) => {
           const shadow = projectBuildingShadow(building, sunPos.azimuth, sunPos.elevation);
-          if (shadow) allShadows.push(shadow);
+          if (shadow) {
+            allShadows.push(shadow);
+          } else {
+            nullCount++;
+          }
         });
+        console.log('Shadows:', allShadows.length, 'null:', nullCount, 'total buildings:', buildingsData.length);
+        console.log('Sample shadow:', allShadows[0]);
         setShadows(allShadows);
-        console.log('Shadows computed:', allShadows.length);
 
         const baselineExposure = calculateRouteExposure(baseline.coordinates, allShadows, sunPos.azimuth);
         baseline.info.sunExposure = baselineExposure;
