@@ -118,9 +118,15 @@ async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Pr
 // Fetch building data from Overpass API
 async function fetchBuildings(minLat: number, minLon: number, maxLat: number, maxLon: number): Promise<Building[]> {
   try {
-    const query = `[out:json][timeout:25];
-      way["building"](${minLat},${minLon},${maxLat},${maxLon});
-      out geom;`;
+    const query = `[out:json][timeout:60];
+(
+  way["building"](${minLat},${minLon},${maxLat},${maxLon});
+  relation["building"](${minLat},${minLon},${maxLat},${maxLon});
+);
+out geom;`;
+
+    console.log('Fetching buildings for bbox:', minLat, minLon, maxLat, maxLon);
+    console.log('Overpass query:', query);
 
     const res = await fetch('https://overpass-api.de/api/interpreter', {
       method: 'POST',
@@ -128,33 +134,51 @@ async function fetchBuildings(minLat: number, minLon: number, maxLat: number, ma
       body: `data=${encodeURIComponent(query)}`,
     });
 
+    if (!res.ok) {
+      console.error('Overpass API error:', res.status, res.statusText);
+      return [];
+    }
+
     const data = await res.json();
+    console.log('Overpass response elements:', data.elements?.length || 0);
+
+    if (!data.elements || data.elements.length === 0) {
+      console.log('No buildings found in area');
+      return [];
+    }
+
     const buildings: Building[] = data.elements
-      .filter((e: any) => e.type === 'way')
+      .filter((e: any) => e.type === 'way' && e.geometry && e.geometry.length > 0)
       .map((e: any) => {
         const footprint = e.geometry.map((n: any) => [n.lon, n.lat] as [number, number]);
         
         let height = 0;
-        if (e.tags.height) {
+        if (e.tags?.height) {
           const match = e.tags.height.match(/^(\d+(?:\.\d+)?)/);
           if (match) height = parseFloat(match[1]);
-        } else if (e.tags['building:levels']) {
+        } else if (e.tags?.['building:levels']) {
           height = parseFloat(e.tags['building:levels']) * 3.5;
         } else {
-          height = 10;
+          height = 15; // Default 15m for Manhattan
         }
 
         return {
           id: e.id,
           footprint,
           height,
-          levels: parseFloat(e.tags['building:levels']) || 1,
+          levels: parseFloat(e.tags?.['building:levels']) || 1,
         };
       })
-      .filter((b: Building) => b.height > 0);
+      .filter((b: Building) => b.height > 0 && b.footprint.length >= 3);
+
+    console.log('Parsed buildings:', buildings.length);
+    if (buildings.length > 0) {
+      console.log('Sample building:', buildings[0].id, 'height:', buildings[0].height, 'points:', buildings[0].footprint.length);
+    }
 
     return buildings;
-  } catch {
+  } catch (err) {
+    console.error('Building fetch error:', err);
     return [];
   }
 }
@@ -784,13 +808,28 @@ function App() {
         const sunPos = getSunPosition(centerLat, centerLon, selectedTime);
         setSunDirection(sunPos.azimuth);
 
-        const padding = 0.005;
+        const padding = 0.008; // ~800m padding
         const minLat = Math.min(start.lat, end.lat) - padding;
         const maxLat = Math.max(start.lat, end.lat) + padding;
         const minLon = Math.min(start.lng, end.lng) - padding;
         const maxLon = Math.max(start.lng, end.lng) + padding;
         
-        const buildingsData = await fetchBuildings(minLat, minLon, maxLat, maxLon);
+        let buildingsData = await fetchBuildings(minLat, minLon, maxLat, maxLon);
+        
+        // If no buildings found, try a larger area
+        if (buildingsData.length === 0) {
+          console.log('No buildings found, trying larger area...');
+          const largerPadding = 0.02;
+          const centerLat = (start.lat + end.lat) / 2;
+          const centerLon = (start.lng + end.lng) / 2;
+          buildingsData = await fetchBuildings(
+            centerLat - largerPadding,
+            centerLon - largerPadding,
+            centerLat + largerPadding,
+            centerLon + largerPadding
+          );
+        }
+        
         setBuildings(buildingsData);
 
         const allShadows: ShadowPolygon[] = [];
