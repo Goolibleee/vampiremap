@@ -86,14 +86,15 @@ async function fetchRoutes(start: Point, end: Point): Promise<RouteData[]> {
 
     const res = await fetch(url);
     const data = await res.json();
-    console.log('OSRM response routes:', data.routes?.length || 0);
+    console.log('OSRM response:', data);
+    console.log('OSRM routes count:', data.routes?.length || 0);
 
     if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
       console.error('No routes found in response:', data);
       return [];
     }
 
-    return data.routes.map((route: any, index: number) => {
+    const routes = data.routes.map((route: any, index: number) => {
       if (!route.geometry || !route.geometry.coordinates) {
         console.error('Route missing geometry:', route);
         return null;
@@ -110,6 +111,9 @@ async function fetchRoutes(start: Point, end: Point): Promise<RouteData[]> {
         },
       };
     }).filter((r: any) => r !== null);
+
+    console.log('Parsed routes:', routes.length);
+    return routes;
   } catch (err) {
     console.error('Route fetch error:', err);
     return [];
@@ -811,8 +815,6 @@ function App() {
         if (allRoutes.length === 0) {
           throw new Error('No route found');
         }
-        
-        const baseline = allRoutes[0];
 
         const centerLat = (start.lat + end.lat) / 2;
         const centerLon = (start.lng + end.lng) / 2;
