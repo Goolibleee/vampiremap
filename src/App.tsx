@@ -77,6 +77,44 @@ const TIME_OPTIONS = [
 
 
 
+// Fetch a single route from OSRM with optional waypoints
+async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Promise<RouteData | null> {
+  try {
+    const allPoints = [start, ...waypoints, end];
+    const coordsStr = allPoints.map((p) => `${p.lng},${p.lat}`).join(';');
+    
+    const url = `${ROUTING_URL}/${coordsStr}?overview=full&geometries=geojson&steps=false`;
+    console.log('Fetching route:', url);
+
+    const res = await fetch(url);
+    const data = await res.json();
+    console.log('OSRM response:', data);
+
+    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+      console.error('No route found in response:', data);
+      return null;
+    }
+
+    const route = data.routes[0];
+    const coordinates = route.geometry.coordinates;
+
+    return {
+      id: 'route',
+      label: 'Route',
+      color: '#aa3bff',
+      coordinates,
+      info: {
+        distance: route.distance,
+        duration: route.duration,
+        sunExposure: 0,
+      },
+    };
+  } catch (err) {
+    console.error('Route fetch error:', err);
+    return null;
+  }
+}
+
 // Fetch routes from OSRM with alternatives
 async function fetchRoutes(start: Point, end: Point): Promise<RouteData[]> {
   try {
@@ -891,17 +929,49 @@ function App() {
           },
         ];
         
-        // Always add the shadiest route as a second option (even if it's the same path)
-        // This lets the user compare the two
-        if (allRoutes.length > 1 && shadiestRoute.id !== fastestRoute.id) {
+        // If OSRM only gave 1 route, generate a shadier alternative using waypoints
+        if (allRoutes.length === 1) {
+          console.log('Only 1 OSRM route, generating shaded alternative...');
+          
+          const shadowDirection = (sunPos.azimuth + 180) % 360;
+          const shadowRad = shadowDirection * Math.PI / 180;
+          const latDegPerKm = 1 / 111;
+          const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
+          
+          // Generate a waypoint on the shaded side
+          const midLng = (start.lng + end.lng) / 2;
+          const midLat = (start.lat + end.lat) / 2;
+          const sideOffset = 0.3; // 300m
+          
+          const shadedWaypoint = {
+            lng: midLng + Math.cos(shadowRad + Math.PI / 2) * sideOffset * lngDegPerKm,
+            lat: midLat + Math.sin(shadowRad + Math.PI / 2) * sideOffset * latDegPerKm,
+          };
+          
+          const shadedRoute = await fetchRoute(start, end, [shadedWaypoint]);
+          if (shadedRoute) {
+            shadedRoute.info.sunExposure = calculateRouteExposure(shadedRoute.coordinates, allShadows, sunPos.azimuth);
+            
+            if (shadedRoute.info.sunExposure < fastestRoute.info.sunExposure) {
+              displayRoutes.push({
+                ...shadedRoute,
+                id: 'shadiest',
+                label: `Shadiest Route (${selectedTime})`,
+                color: '#22c55e',
+              });
+              console.log('Added shaded alternative, exposure:', shadedRoute.info.sunExposure);
+            } else {
+              console.log('Shaded alternative not better, exposure:', shadedRoute.info.sunExposure);
+            }
+          }
+        } else if (shadiestRoute.id !== fastestRoute.id) {
+          // OSRM gave multiple routes and shadiest is different
           displayRoutes.push({
             ...shadiestRoute,
             id: 'shadiest',
             label: `Shadiest Route (${selectedTime})`,
             color: '#22c55e',
           });
-        } else if (allRoutes.length === 1) {
-          console.log('Only 1 route returned by OSRM, no alternatives available');
         } else {
           console.log('Shadiest route is the same as fastest');
         }
@@ -913,11 +983,13 @@ function App() {
         baselineAnalysis.alternativesConsidered = allRoutes.length;
         baselineAnalysis.chosenReason = 'Shortest path';
         
-        const shadiestAnalysis = analyzeRoute(shadiestRoute, allShadows, sunPos.azimuth, buildingsData);
+        const shadiestAnalysis = displayRoutes.length > 1 
+          ? analyzeRoute(displayRoutes[1], allShadows, sunPos.azimuth, buildingsData)
+          : analyzeRoute(fastestRoute, allShadows, sunPos.azimuth, buildingsData);
         shadiestAnalysis.alternativesConsidered = allRoutes.length;
-        const exposureDiff = fastestRoute.info.sunExposure - shadiestRoute.info.sunExposure;
+        const exposureDiff = fastestRoute.info.sunExposure - (displayRoutes[1]?.info.sunExposure || fastestRoute.info.sunExposure);
         shadiestAnalysis.chosenReason = exposureDiff > 0.01
-          ? `Lower sun exposure (${(shadiestRoute.info.sunExposure * 100).toFixed(1)}% vs ${(fastestRoute.info.sunExposure * 100).toFixed(1)}%)`
+          ? `Lower sun exposure (${((displayRoutes[1]?.info.sunExposure || 0) * 100).toFixed(1)}% vs ${(fastestRoute.info.sunExposure * 100).toFixed(1)}%)`
           : 'Same as baseline (no better alternative found)';
         
         setRouteAnalysis([baselineAnalysis, shadiestAnalysis]);
