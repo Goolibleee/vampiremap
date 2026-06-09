@@ -93,17 +93,23 @@ async function fetchRoutes(start: Point, end: Point): Promise<RouteData[]> {
       return [];
     }
 
-    return data.routes.map((route: any, index: number) => ({
-      id: `route-${index}`,
-      label: index === 0 ? 'Fastest Route' : `Alternative ${index}`,
-      color: index === 0 ? '#aa3bff' : '#888888',
-      coordinates: route.geometry.coordinates,
-      info: {
-        distance: route.distance,
-        duration: route.duration,
-        sunExposure: 0,
-      },
-    }));
+    return data.routes.map((route: any, index: number) => {
+      if (!route.geometry || !route.geometry.coordinates) {
+        console.error('Route missing geometry:', route);
+        return null;
+      }
+      return {
+        id: `route-${index}`,
+        label: index === 0 ? 'Fastest Route' : `Alternative ${index}`,
+        color: index === 0 ? '#aa3bff' : '#888888',
+        coordinates: route.geometry.coordinates,
+        info: {
+          distance: route.distance,
+          duration: route.duration,
+          sunExposure: 0,
+        },
+      };
+    }).filter((r: any) => r !== null);
   } catch (err) {
     console.error('Route fetch error:', err);
     return [];
@@ -787,7 +793,7 @@ function App() {
   useEffect(() => {
     if (!start || !end) return;
 
-    const fetchRoutes = async () => {
+    const fetchRoutesData = async () => {
       setLoading(true);
       setError(null);
       setRoutes([]);
@@ -951,7 +957,7 @@ function App() {
       }
     };
 
-    fetchRoutes();
+    fetchRoutesData();
   }, [start, end, selectedTime, showShadows]);
 
   const handleReset = () => {
