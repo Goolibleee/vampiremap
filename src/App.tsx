@@ -31,8 +31,10 @@ interface Building {
 }
 
 interface ShadowPolygon {
+  buildingId: number;
   footprint: [number, number][];
   shadow: [number, number][];
+  height: number;
 }
 
 interface SegmentAnalysis {
@@ -243,8 +245,10 @@ function projectBuildingShadow(building: Building, sunAzimuth: number, sunElevat
   }
   
   return {
+    buildingId: building.id,
     footprint: building.footprint,
     shadow: shadowPoints,
+    height: building.height,
   };
 }
 
@@ -537,6 +541,7 @@ function App() {
   const [showShadows, setShowShadows] = useState(false);
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [buildings, setBuildings] = useState<Building[]>([]);
+  const [shadows, setShadows] = useState<ShadowPolygon[]>([]);
   const [sunDirection, setSunDirection] = useState<number | null>(null);
   const [showAnalysis, setShowAnalysis] = useState(false);
 
@@ -627,6 +632,60 @@ function App() {
 
     heatmapLayersRef.current.push(sourceId);
     heatmapLayersRef.current.push(outlineId);
+  };
+
+  const drawShadows = (shadowsToDraw: ShadowPolygon[]) => {
+    const map = mapRef.current;
+    if (!map || shadowsToDraw.length === 0) return;
+
+    clearShadows();
+
+    const features = shadowsToDraw.map((shadow, index) => ({
+      type: 'Feature',
+      properties: {
+        index,
+        height: shadow.height,
+      },
+      geometry: {
+        type: 'Polygon',
+        coordinates: [shadow.shadow],
+      },
+    }));
+
+    const sourceId = 'shadows-layer';
+
+    map.addSource(sourceId, {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features,
+      },
+    });
+
+    map.addLayer({
+      id: sourceId,
+      type: 'fill',
+      source: sourceId,
+      paint: {
+        'fill-color': '#000000',
+        'fill-opacity': 0.15,
+      },
+    });
+
+    const outlineId = `${sourceId}-outline`;
+    map.addLayer({
+      id: outlineId,
+      type: 'line',
+      source: sourceId,
+      paint: {
+        'line-color': '#222222',
+        'line-width': 0.5,
+        'line-opacity': 0.3,
+      },
+    });
+
+    shadowLayersRef.current.push(sourceId);
+    shadowLayersRef.current.push(outlineId);
   };
 
   const handleMapClick = (lng: number, lat: number) => {
@@ -726,6 +785,17 @@ function App() {
   }, [showHeatmap, buildings]);
 
   useEffect(() => {
+    if (showShadows && shadows.length > 0) {
+      drawShadows(shadows);
+    } else {
+      clearShadows();
+    }
+    return () => {
+      clearShadows();
+    };
+  }, [showShadows, shadows]);
+
+  useEffect(() => {
     if (!start || !end) return;
 
     const fetchRoutes = async () => {
@@ -756,13 +826,15 @@ function App() {
         const buildingsData = await fetchBuildings(minLat, minLon, maxLat, maxLon);
         setBuildings(buildingsData);
 
-        const shadows: ShadowPolygon[] = [];
+        const allShadows: ShadowPolygon[] = [];
         buildingsData.forEach((building) => {
           const shadow = projectBuildingShadow(building, sunPos.azimuth, sunPos.elevation);
-          if (shadow) shadows.push(shadow);
+          if (shadow) allShadows.push(shadow);
         });
+        setShadows(allShadows);
+        console.log('Shadows computed:', allShadows.length);
 
-        const baselineExposure = calculateRouteExposure(baseline.coordinates, shadows, sunPos.azimuth);
+        const baselineExposure = calculateRouteExposure(baseline.coordinates, allShadows, sunPos.azimuth);
         baseline.info.sunExposure = baselineExposure;
 
         const shadowDirection = (sunPos.azimuth + 180) % 360;
@@ -794,7 +866,7 @@ function App() {
             
             const route = await fetchRoute(start, end, [waypoint]);
             if (route) {
-              const exposure = calculateRouteExposure(route.coordinates, shadows, sunPos.azimuth);
+              const exposure = calculateRouteExposure(route.coordinates, allShadows, sunPos.azimuth);
               route.info.sunExposure = exposure;
               alternatives.push(route);
             }
@@ -806,7 +878,7 @@ function App() {
             
             const routeOpposite = await fetchRoute(start, end, [oppositeWaypoint]);
             if (routeOpposite) {
-              const exposureOpp = calculateRouteExposure(routeOpposite.coordinates, shadows, sunPos.azimuth);
+              const exposureOpp = calculateRouteExposure(routeOpposite.coordinates, allShadows, sunPos.azimuth);
               routeOpposite.info.sunExposure = exposureOpp;
               alternatives.push(routeOpposite);
             }
@@ -820,7 +892,7 @@ function App() {
         
         const routeShadow = await fetchRoute(start, end, [midpointShadow]);
         if (routeShadow) {
-          const exposureShadow = calculateRouteExposure(routeShadow.coordinates, shadows, sunPos.azimuth);
+          const exposureShadow = calculateRouteExposure(routeShadow.coordinates, allShadows, sunPos.azimuth);
           routeShadow.info.sunExposure = exposureShadow;
           alternatives.push(routeShadow);
         }
@@ -853,11 +925,11 @@ function App() {
         setRoutes(allRoutes);
 
         // Generate detailed analysis
-        const baselineAnalysis = analyzeRoute(baseline, shadows, sunPos.azimuth, buildingsData);
+        const baselineAnalysis = analyzeRoute(baseline, allShadows, sunPos.azimuth, buildingsData);
         baselineAnalysis.alternativesConsidered = alternatives.length + 1;
         baselineAnalysis.chosenReason = 'Shortest path';
         
-        const shadiestAnalysis = analyzeRoute(shadiestRoute, shadows, sunPos.azimuth, buildingsData);
+        const shadiestAnalysis = analyzeRoute(shadiestRoute, allShadows, sunPos.azimuth, buildingsData);
         shadiestAnalysis.alternativesConsidered = alternatives.length + 1;
         shadiestAnalysis.chosenReason = minExposure < baselineExposure 
           ? `Lower sun exposure (${(minExposure * 100).toFixed(1)}% vs ${(baselineExposure * 100).toFixed(1)}%)`
@@ -906,41 +978,6 @@ function App() {
             });
           });
 
-          if (showShadows && shadows.length > 0) {
-            const significantShadows = shadows.filter((s) => {
-              const footprint = s.footprint;
-              const building = buildingsData.find((b) => b.footprint === footprint);
-              return building && building.height > 20;
-            });
-
-            significantShadows.forEach((shadow, index) => {
-              const shadowId = `shadow-${index}`;
-              map.addSource(shadowId, {
-                type: 'geojson',
-                data: {
-                  type: 'Feature',
-                  properties: {},
-                  geometry: {
-                    type: 'Polygon',
-                    coordinates: [shadow.shadow],
-                  },
-                },
-              });
-
-              map.addLayer({
-                id: shadowId,
-                type: 'fill',
-                source: shadowId,
-                paint: {
-                  'fill-color': '#000000',
-                  'fill-opacity': 0.05,
-                },
-              });
-
-              shadowLayersRef.current.push(shadowId);
-            });
-          }
-
           map.fitBounds(allBounds, { padding: 80, duration: 800 });
         }
 
@@ -963,6 +1000,7 @@ function App() {
     setRoutes([]);
     setRouteAnalysis([]);
     setBuildings([]);
+    setShadows([]);
     setSunDirection(null);
     setError(null);
     setInstruction('Click anywhere on the map to place start');
@@ -1040,6 +1078,12 @@ function App() {
                 <div className="legend-row">
                   <span className="legend-label">Sun Direction:</span>
                   <span className="legend-info">{sunDirection.toFixed(0)}°</span>
+                </div>
+              )}
+              {shadows.length > 0 && (
+                <div className="legend-row">
+                  <span className="legend-label">Shadows:</span>
+                  <span className="legend-info">{shadows.length} buildings</span>
                 </div>
               )}
               <div className="legend-divider" />
