@@ -636,7 +636,12 @@ function App() {
 
   const drawShadows = (shadowsToDraw: ShadowPolygon[]) => {
     const map = mapRef.current;
-    if (!map || shadowsToDraw.length === 0) return;
+    if (!map || shadowsToDraw.length === 0) {
+      console.log('No shadows to draw or no map');
+      return;
+    }
+
+    console.log('Drawing', shadowsToDraw.length, 'shadows');
 
     clearShadows();
 
@@ -662,15 +667,16 @@ function App() {
       },
     });
 
+    // Add shadow layer BEFORE the routes so shadows appear underneath
     map.addLayer({
       id: sourceId,
       type: 'fill',
       source: sourceId,
       paint: {
-        'fill-color': '#000000',
-        'fill-opacity': 0.15,
+        'fill-color': '#000011',
+        'fill-opacity': 0.25,
       },
-    });
+    }, 'osm-layer');
 
     const outlineId = `${sourceId}-outline`;
     map.addLayer({
@@ -678,11 +684,11 @@ function App() {
       type: 'line',
       source: sourceId,
       paint: {
-        'line-color': '#222222',
-        'line-width': 0.5,
-        'line-opacity': 0.3,
+        'line-color': '#000033',
+        'line-width': 1,
+        'line-opacity': 0.5,
       },
-    });
+    }, 'osm-layer');
 
     shadowLayersRef.current.push(sourceId);
     shadowLayersRef.current.push(outlineId);
@@ -785,6 +791,7 @@ function App() {
   }, [showHeatmap, buildings]);
 
   useEffect(() => {
+    console.log('Shadow effect triggered:', showShadows, shadows.length);
     if (showShadows && shadows.length > 0) {
       drawShadows(shadows);
     } else {
