@@ -527,6 +527,7 @@ function App() {
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [shadows, setShadows] = useState<ShadowPolygon[]>([]);
   const [sunDirection, setSunDirection] = useState<number | null>(null);
+  const [sunElevation, setSunElevation] = useState<number | null>(null);
   const [showAnalysis, setShowAnalysis] = useState(false);
 
   const clearMarkers = () => {
@@ -809,6 +810,7 @@ function App() {
         const centerLon = (start.lng + end.lng) / 2;
         const sunPos = getSunPosition(centerLat, centerLon, selectedTime);
         setSunDirection(sunPos.azimuth);
+        setSunElevation(sunPos.elevation);
         console.log('Sun position:', sunPos.azimuth, 'elevation:', sunPos.elevation);
 
         const padding = 0.008; // ~800m padding
@@ -1013,6 +1015,7 @@ function App() {
     setBuildings([]);
     setShadows([]);
     setSunDirection(null);
+    setSunElevation(null);
     setError(null);
     setInstruction('Click anywhere on the map to place start');
     clearMarkers();
@@ -1089,6 +1092,12 @@ function App() {
                 <div className="legend-row">
                   <span className="legend-label">Sun Direction:</span>
                   <span className="legend-info">{sunDirection.toFixed(0)}°</span>
+                </div>
+              )}
+              {sunElevation !== null && sunElevation <= 0 && (
+                <div className="legend-row warning">
+                  <span className="legend-label">⚠️ Nighttime:</span>
+                  <span className="legend-info">No shadows</span>
                 </div>
               )}
               {shadows.length > 0 && (

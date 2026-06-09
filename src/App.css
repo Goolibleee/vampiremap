@@ -236,6 +236,23 @@ html, body, #root {
   font-size: 12px;
 }
 
+.legend-row.warning {
+  background: #fff2f0;
+  border: 1px solid #ff4d4f;
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin: 2px 0;
+}
+
+.legend-row.warning .legend-label {
+  color: #cf1322;
+}
+
+.legend-row.warning .legend-info {
+  color: #ff4d4f;
+  font-weight: 600;
+}
+
 /* Main content layout */
 .main-content {
   display: flex;
