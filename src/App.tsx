@@ -77,41 +77,36 @@ const TIME_OPTIONS = [
 
 
 
-// Fetch a single route from OSRM
-async function fetchRoute(start: Point, end: Point, waypoints: Point[] = []): Promise<RouteData | null> {
+// Fetch routes from OSRM with alternatives
+async function fetchRoutes(start: Point, end: Point): Promise<RouteData[]> {
   try {
-    const allPoints = [start, ...waypoints, end];
-    const coordsStr = allPoints.map((p) => `${p.lng},${p.lat}`).join(';');
-    
-    const url = `${ROUTING_URL}/${coordsStr}?overview=full&geometries=geojson&steps=false`;
-    console.log('Fetching route:', url);
+    const coordsStr = `${start.lng},${start.lat};${end.lng},${end.lat}`;
+    const url = `${ROUTING_URL}/${coordsStr}?overview=full&geometries=geojson&steps=false&alternatives=true`;
+    console.log('Fetching routes with alternatives:', url);
 
     const res = await fetch(url);
     const data = await res.json();
-    console.log('OSRM response:', data);
+    console.log('OSRM response routes:', data.routes?.length || 0);
 
     if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
-      console.error('No route found in response:', data);
-      return null;
+      console.error('No routes found in response:', data);
+      return [];
     }
 
-    const route = data.routes[0];
-    const coordinates = route.geometry.coordinates;
-
-    return {
-      id: 'route',
-      label: 'Route',
-      color: '#aa3bff',
-      coordinates,
+    return data.routes.map((route: any, index: number) => ({
+      id: `route-${index}`,
+      label: index === 0 ? 'Fastest Route' : `Alternative ${index}`,
+      color: index === 0 ? '#aa3bff' : '#888888',
+      coordinates: route.geometry.coordinates,
       info: {
         distance: route.distance,
         duration: route.duration,
         sunExposure: 0,
       },
-    };
+    }));
   } catch (err) {
     console.error('Route fetch error:', err);
-    return null;
+    return [];
   }
 }
 
@@ -801,10 +796,13 @@ function App() {
       clearShadows();
 
       try {
-        const baseline = await fetchRoute(start, end);
-        if (!baseline) {
+        // 1. Fetch multiple routes from OSRM (with alternatives)
+        const allRoutes = await fetchRoutes(start, end);
+        if (allRoutes.length === 0) {
           throw new Error('No route found');
         }
+        
+        const baseline = allRoutes[0];
 
         const centerLat = (start.lat + end.lat) / 2;
         const centerLon = (start.lng + end.lng) / 2;
@@ -813,6 +811,7 @@ function App() {
         setSunElevation(sunPos.elevation);
         console.log('Sun position:', sunPos.azimuth, 'elevation:', sunPos.elevation);
 
+        // 2. Fetch building data
         const padding = 0.008; // ~800m padding
         const minLat = Math.min(start.lat, end.lat) - padding;
         const maxLat = Math.max(start.lat, end.lat) + padding;
@@ -837,6 +836,7 @@ function App() {
         
         setBuildings(buildingsData);
 
+        // 3. Calculate shadows
         const allShadows: ShadowPolygon[] = [];
         let nullCount = 0;
         buildingsData.forEach((building) => {
@@ -851,101 +851,48 @@ function App() {
         console.log('Sample shadow:', allShadows[0]);
         setShadows(allShadows);
 
-        const baselineExposure = calculateRouteExposure(baseline.coordinates, allShadows, sunPos.azimuth);
-        baseline.info.sunExposure = baselineExposure;
-
-        const shadowDirection = (sunPos.azimuth + 180) % 360;
-        const shadowRad = shadowDirection * Math.PI / 180;
-        
-        const alternatives: RouteData[] = [];
-        const latDegPerKm = 1 / 111;
-        const lngDegPerKm = 1 / (111 * Math.cos(centerLat * Math.PI / 180));
-        
-        const perpendicularToSun = shadowRad + Math.PI / 2;
-        
-        const numSegments = 5;
-        const sideOffsets = [0.15, 0.25, 0.35, 0.5];
-        
-        for (const sideOffset of sideOffsets) {
-          for (let i = 1; i < numSegments; i++) {
-            const t = i / numSegments;
-            const baseLng = start.lng + (end.lng - start.lng) * t;
-            const baseLat = start.lat + (end.lat - start.lat) * t;
-            
-            const waypoint = {
-              lng: baseLng + Math.cos(perpendicularToSun) * sideOffset * lngDegPerKm,
-              lat: baseLat + Math.sin(perpendicularToSun) * sideOffset * latDegPerKm,
-            };
-            
-            const route = await fetchRoute(start, end, [waypoint]);
-            if (route) {
-              const exposure = calculateRouteExposure(route.coordinates, allShadows, sunPos.azimuth);
-              route.info.sunExposure = exposure;
-              alternatives.push(route);
-            }
-            
-            const oppositeWaypoint = {
-              lng: baseLng - Math.cos(perpendicularToSun) * sideOffset * lngDegPerKm,
-              lat: baseLat - Math.sin(perpendicularToSun) * sideOffset * latDegPerKm,
-            };
-            
-            const routeOpposite = await fetchRoute(start, end, [oppositeWaypoint]);
-            if (routeOpposite) {
-              const exposureOpp = calculateRouteExposure(routeOpposite.coordinates, allShadows, sunPos.azimuth);
-              routeOpposite.info.sunExposure = exposureOpp;
-              alternatives.push(routeOpposite);
-            }
-          }
-        }
-        
-        const midpointShadow = {
-          lng: centerLon + Math.cos(shadowRad) * 0.3 * lngDegPerKm,
-          lat: centerLat + Math.sin(shadowRad) * 0.3 * latDegPerKm,
-        };
-        
-        const routeShadow = await fetchRoute(start, end, [midpointShadow]);
-        if (routeShadow) {
-          const exposureShadow = calculateRouteExposure(routeShadow.coordinates, allShadows, sunPos.azimuth);
-          routeShadow.info.sunExposure = exposureShadow;
-          alternatives.push(routeShadow);
-        }
-        
-        let shadiestRoute = baseline;
-        let minExposure = baselineExposure;
-        
-        alternatives.forEach((alt) => {
-          if (alt.info.sunExposure < minExposure) {
-            minExposure = alt.info.sunExposure;
-            shadiestRoute = alt;
-          }
+        // 4. Score ALL routes for sun exposure
+        allRoutes.forEach((route) => {
+          route.info.sunExposure = calculateRouteExposure(route.coordinates, allShadows, sunPos.azimuth);
         });
-
-        const allRoutes: RouteData[] = [
+        
+        // Sort by exposure (lowest first)
+        allRoutes.sort((a, b) => a.info.sunExposure - b.info.sunExposure);
+        
+        const baselineExposure = allRoutes[0].info.sunExposure;
+        const shadiestRoute = allRoutes[0];
+        
+        // 5. Create display routes
+        const displayRoutes: RouteData[] = [
           {
             ...baseline,
             id: 'fastest',
             label: 'Fastest Route',
             color: '#aa3bff',
           },
-          {
+        ];
+        
+        // If the shadiest route is different from the fastest, add it
+        if (shadiestRoute.id !== baseline.id) {
+          displayRoutes.push({
             ...shadiestRoute,
             id: 'shadiest',
             label: `Shadiest Route (${selectedTime})`,
             color: '#22c55e',
-          },
-        ];
+          });
+        }
 
-        setRoutes(allRoutes);
+        setRoutes(displayRoutes);
 
-        // Generate detailed analysis
+        // 6. Generate detailed analysis
         const baselineAnalysis = analyzeRoute(baseline, allShadows, sunPos.azimuth, buildingsData);
-        baselineAnalysis.alternativesConsidered = alternatives.length + 1;
+        baselineAnalysis.alternativesConsidered = allRoutes.length;
         baselineAnalysis.chosenReason = 'Shortest path';
         
         const shadiestAnalysis = analyzeRoute(shadiestRoute, allShadows, sunPos.azimuth, buildingsData);
-        shadiestAnalysis.alternativesConsidered = alternatives.length + 1;
-        shadiestAnalysis.chosenReason = minExposure < baselineExposure 
-          ? `Lower sun exposure (${(minExposure * 100).toFixed(1)}% vs ${(baselineExposure * 100).toFixed(1)}%)`
+        shadiestAnalysis.alternativesConsidered = allRoutes.length;
+        shadiestAnalysis.chosenReason = baselineExposure < allRoutes[0].info.sunExposure 
+          ? `Lower sun exposure (${(baselineExposure * 100).toFixed(1)}% vs ${(allRoutes[0].info.sunExposure * 100).toFixed(1)}%)`
           : 'Same as baseline (no better alternative found)';
         
         setRouteAnalysis([baselineAnalysis, shadiestAnalysis]);
