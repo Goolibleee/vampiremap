@@ -187,15 +187,19 @@ out geom;`;
 // Calculate sun position
 function getSunPosition(lat: number, lon: number, timeStr: string) {
   let date: Date;
-  
+
   if (timeStr === 'now') {
     date = new Date();
   } else {
     const [hours, minutes] = timeStr.split(':').map(Number);
+    // Create a date that represents the selected time in NYC timezone (EDT = UTC-4)
+    // We need to convert local time to UTC for SunCalc
+    const timezoneOffset = 4; // UTC-4 for EDT (NYC summer)
+    const utcHours = hours + timezoneOffset;
     date = new Date();
-    date.setHours(hours, minutes, 0, 0);
+    date.setUTCHours(utcHours, minutes, 0, 0);
   }
-  
+
   const pos = SunCalc.getPosition(date, lat, lon);
   return {
     azimuth: (pos.azimuth * 180 / Math.PI + 360) % 360,
